@@ -8,6 +8,7 @@
 
 ## 📑 Содержание
 
+- [🧰 0. Подготовка](#-0-подготовка)
 - [📦 1. Установка](#-1-установка)
 - [🆕 2. Первый запуск](#-2-первый-запуск)
 - [⚙️ 3. Использование](#️-3-использование)
@@ -15,6 +16,73 @@
 - [🛠️ 5. Частые вопросы и решение проблем](#️-5-частые-вопросы-и-решение-проблем)
 
 ---
+## 🧰 0. Подготовка
+
+Перед установкой программы выполните несколько простых шагов.
+
+### 📥 Шаг 1. Скачайте программу с GitHub
+
+1. Откройте страницу **[Releases](../../releases)** в этом репозитории.
+2. Выберите последнюю стабильную версию программы.
+3. В разделе **Assets** скачайте необходимые файлы.
+4. Распакуйте скачанный архив, если он есть, в удобную папку.
+
+> ⚠️ Рекомендуется скачивать программу только со страницы Releases этого репозитория, чтобы получить файлы соответствующей версии.
+
+### 🇷🇺 Шаг 2. (Необязательно) Настройте доступ к GitHub через Zapret
+
+Этот шаг предназначен для пользователей из России, у которых GitHub открывается медленно, работает нестабильно или не позволяет скачивать файлы.
+
+Можно попробовать настроить [**zapret-discord-youtube от Flowseal**](https://github.com/Flowseal/zapret-discord-youtube/releases), добавив необходимые домены GitHub в используемый список правил.
+
+**🌐 Домены GitHub для добавления:**
+
+```text
+github.com
+*.github.com
+githubusercontent.com
+*.githubusercontent.com
+raw.githubusercontent.com
+objects.githubusercontent.com
+github-releases.githubusercontent.com
+github-cloud.githubusercontent.com
+github-cloud.s3.amazonaws.com
+codeload.github.com
+avatars.githubusercontent.com
+user-images.githubusercontent.com
+private-user-images.githubusercontent.com
+media.githubusercontent.com
+desktop.githubusercontent.com
+githubassets.com
+*.githubassets.com
+githubapp.com
+*.githubapp.com
+github.io
+*.github.io
+ghe.com
+*.ghe.com
+ghcr.io
+*.ghcr.io
+githubcopilot.com
+*.githubcopilot.com
+api.github.com
+uploads.github.com
+gist.github.com
+lfs.github.com
+```
+
+**⚙️ Что нужно сделать:**
+
+1. Откройте [Releases zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube/releases) и скачайте подходящую версию.
+2. Настройте программу согласно ее собственной инструкции.
+3. Добавьте перечисленные домены в соответствующий список правил или конфигурацию, если используемая версия поддерживает такой формат.
+4. Перезапустите необходимые компоненты и проверьте, открывается ли GitHub и скачиваются ли файлы.
+
+> ⚠️ **Важно:** этот шаг необязателен. Если GitHub работает нормально, ничего настраивать не нужно. Конкретный способ добавления доменов зависит от версии и конфигурации Zapret. Список выше охватывает основные адреса GitHub, но не гарантирует доступность всех его сервисов. Не добавляйте правила вслепую - сверяйтесь с инструкцией используемой версии.
+
+### ✅ Готово!
+
+После скачивания необходимых файлов переходите к следующему разделу - [📦 Установка](#-1-установка).
 
 ## 📦 1. Установка
 
