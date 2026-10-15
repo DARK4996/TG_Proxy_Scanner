@@ -122,42 +122,84 @@ STATIC_SOURCES = [
     ('tg:gidroski', 'tgchannel://gidroski'),
 ]
 
-# Пункт №1 обращения — "Добавить сканирование не только MTProto, но и всех видов
-# прокси, таких как SOCKS5, HTTP, WEB" — включается отдельной галочкой "Включить
-# другие виды прокси" (см. other_proxy_types в настройках), ПОТОМУ ЧТО для каждого
-# типа действительно нужна своя проверка (как и предупреждал пользователь), и не
-# всем это нужно по умолчанию. Когда включено, эти готовые источники каждый
-# подключаются ДОПОЛНИТЕЛЬНО к обычным mtproto-источникам (и в статичном, и в
-# динамическом режиме) — см. scan().
-# ОБНОВЛЕНО по следующему обращению: пользователь прислал реальную ссылку подключения
-# WEB-прокси ("tg://webproxy?server=...&secret=...") — исследование (официальный
-# репозиторий telegramdesktop/tproxy-server) подтвердило, что это настоящий, хоть и
-# не полностью документированный публично, протокол: HTTPS-сайт на 443 порту с
-# секретом, который после проверки открывает скрытый мост до MTProxy-бэкенда. Точный
-# алгоритм этого моста (PROTOCOL.md) Telegram не опубликовал, поэтому проверить САМ
-# мост так же строго, как MTProto/SOCKS5/HTTP, нельзя — но настоящую TLS+HTTPS-
-# доступность сервера (не просто "порт отвечает") проверить можно и нужно, см.
-# _check_web_proxy. Готового отдельного публичного списка именно WEB-ссылок пока не
-# нашлось (формат новый), поэтому ниже нет отдельного WEB-источника — зато
-# parse_webproxy_link разбирает такие ссылки, если они встретятся в тексте любого
-# источника/канала (см. parse_proxies).
-OTHER_PROXY_SOURCES = [
-    ('Argh94-SOCKS5', 'https://raw.githubusercontent.com/Argh94/Proxy-List/main/SOCKS5.txt'),
-    ('Argh94-HTTP', 'https://raw.githubusercontent.com/Argh94/Proxy-List/main/HTTP.txt'),
-    # Публикует SOCKS5 как готовые "tg://socks?server=...&port=..." ссылки (проверено
-    # вручную), а не "сырым" socks5://host:port — поэтому НЕ в OTHER_SOURCE_TYPES ниже:
-    # разбирается обычным parse_proxies(include_other=True), который теперь понимает
-    # оба формата (см. TG_SOCKS_RE).
-    ('kort0881-SOCKS5', 'https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/socks5.txt'),
-]
-# url -> тип прокси в этом источнике (используется load_sources(), чтобы разобрать
-# файл через parse_typed_links вместо обычного parse_proxies — файл целиком одного
-# типа в формате host:port/scheme://host:port, можно не угадывать тип по содержимому
-# каждой строки). Источники с готовыми tg://-ссылками сюда НЕ добавляются — см. выше.
-OTHER_SOURCE_TYPES = {
-    'https://raw.githubusercontent.com/Argh94/Proxy-List/main/SOCKS5.txt':'socks5',
-    'https://raw.githubusercontent.com/Argh94/Proxy-List/main/HTTP.txt':'http',
+# v30 (пункт №1 обращения): вместо одной галочки «Включить другие виды прокси» —
+# отдельный выбор по видам: MTProto, SOCKS5, HTTP, WEB (см. PROXY_TYPES и четыре
+# галочки ptype_* в настройках). Каждый выбранный вид получает СВОЙ поиск: свои готовые
+# списки (TYPED_STATIC_SOURCES), свои запросы к GitHub (DISCOVERY_QUERIES_BY_TYPE), свои
+# имена файлов (COMMON_FILENAMES_BY_TYPE), свою проверку содержимого найденного источника
+# (sample_matches_type) и свой разбор (parse_proxies(types=...)/parse_typed_links).
+# Невыбранные виды не ищутся, не разбираются и не проверяются вообще.
+# Для каждого типа действительно нужна своя проверка (как и предупреждал пользователь):
+# SOCKS5/HTTP — полное рукопожатие + CONNECT до core.telegram.org, WEB — настоящее TLS+
+# HTTPS (см. _check_web_proxy; сам «мост» WEB Telegram публично не документирует, поэтому
+# глубже честно не проверяется).
+PROXY_TYPES = ('mtproto', 'socks5', 'http', 'web')
+
+# Готовые списки по типам. Все адреса проверены вручную (v30): отдают живые списки.
+# kort0881-SOCKS5 публикует SOCKS5 как готовые "tg://socks?server=...&port=..." ссылки,
+# поэтому НЕ в OTHER_SOURCE_TYPES ниже: разбирается обычным parse_proxies(types=...),
+# который понимает оба формата (см. TG_SOCKS_RE). Готового публичного списка именно
+# WEB-ссылок пока нет (формат новый) — они ищутся в тексте тг-каналов и найденных
+# источников (parse_webproxy_link), см. DISCOVERY_QUERIES_BY_TYPE['web'].
+TYPED_STATIC_SOURCES = {
+    'socks5': [
+        ('Argh94-SOCKS5', 'https://raw.githubusercontent.com/Argh94/Proxy-List/main/SOCKS5.txt'),
+        ('kort0881-SOCKS5', 'https://raw.githubusercontent.com/kort0881/telegram-proxy-collector/main/socks5.txt'),
+        ('TheSpeedX-SOCKS5', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'),
+        ('monosans-SOCKS5', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt'),
+        ('jetkai-SOCKS5', 'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt'),
+    ],
+    'http': [
+        ('Argh94-HTTP', 'https://raw.githubusercontent.com/Argh94/Proxy-List/main/HTTP.txt'),
+        ('TheSpeedX-HTTP', 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
+        ('monosans-HTTP', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'),
+        ('jetkai-HTTP', 'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt'),
+    ],
+    'web': [],
 }
+# Совместимость со старым именем (плоский список всех «не-MTProto» готовых источников).
+OTHER_PROXY_SOURCES = [s for t in ('socks5', 'http', 'web') for s in TYPED_STATIC_SOURCES[t]]
+# url -> тип прокси в этом источнике (load_sources() разбирает такой файл через
+# parse_typed_links вместо parse_proxies — файл целиком одного типа в формате
+# host:port / scheme://host:port, тип по строкам угадывать не нужно). Источники с
+# готовыми tg://-ссылками сюда НЕ добавляются — см. выше.
+OTHER_SOURCE_TYPES = {
+    'https://raw.githubusercontent.com/Argh94/Proxy-List/main/SOCKS5.txt': 'socks5',
+    'https://raw.githubusercontent.com/Argh94/Proxy-List/main/HTTP.txt': 'http',
+    'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt': 'socks5',
+    'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt': 'http',
+    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt': 'socks5',
+    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt': 'http',
+    'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt': 'socks5',
+    'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt': 'http',
+}
+# Типы источников, найденных ДИНАМИЧЕСКИ (discover_sources): url -> 'socks5'/'http' для
+# «голых» списков host:port (как OTHER_SOURCE_TYPES, но заполняется на лету).
+_SOURCE_TYPE_HINTS = {}
+
+def normalize_types(types):
+    """Приводит набор видов прокси к каноническому кортежу в порядке PROXY_TYPES; None —
+    «как раньше», только MTProto. Неизвестные значения отбрасываются."""
+    if types is None: return ('mtproto',)
+    s = {t for t in types if t in PROXY_TYPES}
+    return tuple(t for t in PROXY_TYPES if t in s)
+
+def enabled_types_from_settings(d):
+    """Какие виды прокси включены в словаре настроек. Новые ключи ptype_<вид>; если их
+    нет вовсе (файл настроек от версии ≤v29) — старая галочка other_proxy_types: True
+    включала SOCKS5+HTTP+WEB дополнительно к MTProto. Может вернуть пустой кортеж
+    (пользователь снял все галочки) — вызывающий код обязан это обработать."""
+    if any(('ptype_'+t) in d for t in PROXY_TYPES):
+        return tuple(t for t in PROXY_TYPES if d.get('ptype_'+t, t == 'mtproto'))
+    if d.get('other_proxy_types'): return PROXY_TYPES
+    return ('mtproto',)
+
+def typed_sources_for(types):
+    """Готовые списки (name,url) для выбранных видов, в порядке PROXY_TYPES."""
+    out = []
+    for t in normalize_types(types):
+        out.extend(TYPED_STATIC_SOURCES.get(t, []))
+    return out
 
 # Подписи типа прокси для колонки "Тип" в таблице результатов (пункт №1 обращения).
 PTYPE_LABELS = {'mtproto':'MTProto','socks5':'SOCKS5','http':'HTTP','web':'WEB'}
@@ -197,6 +239,55 @@ DISCOVERY_QUERIES = [
     'прокси telegram mtproto','mtproto прокси телеграм','free mtproto proxy github',
     'لیست پروکسی تلگرام mtproto','telegram proxy iran mtproto',
 ]
+
+# v30: запросы и имена файлов ПО ВИДАМ прокси (discover_sources выполняет только те, что
+# относятся к выбранным видам). У каждого вида своя экосистема репозиториев: у SOCKS5/HTTP —
+# огромные универсальные списки (topic:socks5-proxy, proxy-list…), у WEB — совсем новый
+# формат tg://webproxy (репозиториев почти нет, поэтому WEB в основном ищется в тексте
+# тг-каналов и страницах улучшенного поиска). Запросов у не-MTProto видов намного меньше —
+# лимит GitHub Search API общий (~10/мин без токена), см. discover_sources.
+DISCOVERY_QUERIES_BY_TYPE = {
+    'mtproto': DISCOVERY_QUERIES,
+    'socks5': ['topic:socks5-proxy', 'topic:socks5', 'socks5 proxy list', 'free socks5 proxy list telegram'],
+    'http': ['topic:http-proxy', 'topic:proxy-list', 'http proxy list', 'free http proxy list'],
+    'web': ['telegram webproxy', 'tg://webproxy list'],
+}
+COMMON_FILENAMES_BY_TYPE = {
+    'mtproto': COMMON_PROXY_FILENAMES,
+    'socks5': ['socks5.txt','SOCKS5.txt','socks5_proxies.txt','socks5-proxies.txt','proxies/socks5.txt',
+               'proxies-socks5.txt','socks5/data.txt','proxies/protocols/socks5/data.txt','socks.txt',
+               'proxy.txt','proxies.txt','all.txt','list.txt','README.md'],
+    'http': ['http.txt','HTTP.txt','https.txt','http_proxies.txt','http-proxies.txt','proxies/http.txt',
+             'proxies-http.txt','http/data.txt','proxies/protocols/http/data.txt','proxy.txt','proxies.txt',
+             'all.txt','list.txt','README.md'],
+    'web': ['webproxy.txt','web.txt','web_proxies.txt','proxies.txt','proxy.txt','all_proxies.txt','README.md'],
+}
+
+# Содержимое найденного кандидата проверяется ПО ВИДУ (никогда по одному имени файла):
+# MTProto — ссылки с secret=/t.me/proxy; SOCKS5/HTTP — много строк host:port (с/без схемы)
+# либо tg://socks; WEB — хотя бы одна ссылка tg://webproxy.
+_IPPORT_LINE_RE = re.compile(r'^\s*(?:(?:socks5|http|https)://)?(?:[^:@/\s]{1,64}:[^@/\s]{0,64}@)?\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}\s*$', re.M)
+
+def sample_matches_type(sample, ptype):
+    if not sample: return False
+    if ptype == 'mtproto':
+        return sample.count('secret=') >= 2 or len(re.findall(r't\.me/proxy', sample)) >= 2
+    if ptype in ('socks5', 'http'):
+        if ptype == 'socks5' and len(TG_SOCKS_RE.findall(sample)) >= 2: return True
+        return len(_IPPORT_LINE_RE.findall(sample)) >= 10
+    if ptype == 'web':
+        return len(TG_WEBPROXY_RE.findall(sample)) >= 1
+    return False
+
+def _guess_list_type(url):
+    """Тип «голого» списка host:port по пути файла: 'socks5' / 'http' / 'socks4' (такие
+    списки не поддерживаются — отбрасываются) / None, если по имени не понять."""
+    try: path = urllib.parse.urlparse(url).path.lower()
+    except Exception: return None
+    if 'socks4' in path: return 'socks4'
+    if 'socks' in path: return 'socks5'
+    if 'http' in path: return 'http'
+    return None
 
 # "Улучшенный поиск" (enhanced=True): помимо GitHub, источниками также считаются
 # открытые тг-каналы и сайты, которые публикуют прокси-ссылки напрямую на своих
@@ -453,7 +544,7 @@ def _decode_console_bytes(b):
         except Exception: continue
     return b.decode('utf-8','replace')
 
-def http_get(url, timeout=12):
+def http_get(url, timeout=12, extra_headers=None):
     errors=[]
     headers={
         'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
@@ -461,6 +552,7 @@ def http_get(url, timeout=12):
         'Accept-Language':'en-US,en;q=0.9',
         'Cache-Control':'no-cache',
     }
+    if extra_headers: headers.update(extra_headers)  # v30: нужен шлюзам чтения Telegram (например, X-Return-Format у r.jina.ai)
     log(f'HTTP START url={url} timeout={timeout}')
     for attempt in range(2):
         try:
@@ -479,7 +571,8 @@ def http_get(url, timeout=12):
         log(f'curl lookup: {curl!r}')
         if curl:
             try:
-                cp=subprocess.run([curl,'-L','--fail','--silent','--show-error','--max-time',str(max(5,int(timeout))),'-A',headers['User-Agent'],'-H','Accept: '+headers['Accept'],'--compressed',url],
+                extra_h=[x for k,v in (extra_headers or {}).items() for x in ('-H',f'{k}: {v}')]
+                cp=subprocess.run([curl,'-L','--fail','--silent','--show-error','--max-time',str(max(5,int(timeout))),'-A',headers['User-Agent'],'-H','Accept: '+headers['Accept'],*extra_h,'--compressed',url],
                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout+3,
                                    creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 stderr=_decode_console_bytes(cp.stderr).strip()
@@ -505,6 +598,108 @@ def http_get(url, timeout=12):
             msg=f'powershell: {type(e).__name__}: {e}'; errors.append(msg); log(f'HTTP FAIL {msg}', True)
     err=' | '.join(errors[-6:])
     log(f'HTTP FINAL FAIL url={url}: {err}')
+    raise RuntimeError(err)
+
+
+def _subprocess_kwargs():
+    """creationflags=CREATE_NO_WINDOW подавляет мелькание консольного окна у curl/
+    powershell на Windows — но на POSIX subprocess.Popen вообще не принимает такой
+    именованный аргумент (TypeError), поэтому раньше это было безопасно только потому,
+    что вызывалось исключительно внутри `if sys.platform=='win32':` (см. http_get выше).
+    Новым прокси-функциям ниже curl нужен НЕ только на Windows (в отличие от http_get,
+    где curl — последний резервный способ, здесь он основной способ использовать SOCKS5/
+    HTTP-прокси, которого нет у urllib без стороннего пакета) — поэтому вынесено в
+    отдельный хелпер, который просто ничего не добавляет на не-Windows."""
+    return {'creationflags':subprocess.CREATE_NO_WINDOW} if sys.platform=='win32' else {}
+
+
+def _build_curl_proxy_arg(proxy):
+    """Строит значение для curl --proxy из прокси-словаря пользователя (настройка
+    «Рабочий прокси для Telegram-источников», пункт №1 обращения v29). Возвращает None,
+    если этот конкретный тип прокси технически не может пересылать произвольный
+    HTTPS-трафик — см. большой комментарий у http_get_via_proxy ниже про то, почему
+    MTProto/WEB сюда не годятся, только SOCKS5/HTTP."""
+    ptype=(proxy or {}).get('ptype')
+    if ptype not in ('socks5','http'): return None
+    auth=''
+    if proxy.get('user'):
+        auth=f"{urllib.parse.quote(proxy['user'],safe='')}:{urllib.parse.quote(proxy.get('password') or '',safe='')}@"
+    if ptype=='socks5':
+        # socks5h (а не просто socks5): резолвит имя хоста ЧЕРЕЗ сам прокси, а не
+        # локально — важно именно в нашем сценарии, когда t.me заблокирован похоже на
+        # DNS/SNI-уровне: локальный DNS-запрос к t.me может сам быть частью блокировки.
+        return f"socks5h://{auth}{proxy['server']}:{proxy['port']}"
+    return f"http://{auth}{proxy['server']}:{proxy['port']}"
+
+
+def http_get_via_proxy(url, timeout, proxy):
+    """Как http_get(), но маршрутизирует запрос через указанный пользователем «рабочий
+    прокси» (настройка в UI) — используется ТОЛЬКО для доменов Telegram (t.me), которые
+    могут быть заблокированы на сети пользователя напрямую (см. tme_reachable,
+    fetch_telegram_channel_text). Пункт №1 обращения v29: "подключение к telegram можно
+    осуществлять через рабочий прокси... касается всех telegram источников".
+
+    ВАЖНОЕ ТЕХНИЧЕСКОЕ ОГРАНИЧЕНИЕ (честно, без притворства): MTProto-прокси умеет
+    пересылать только сам протокол Telegram (MTProto) непосредственно до серверов
+    Telegram — он НЕ является прокси общего назначения и physически не может
+    переслать произвольный HTTPS-запрос вроде https://t.me/s/канал (это обычная
+    веб-страница, а не MTProto-трафик). То же касается WEB-прокси (tg://webproxy) —
+    у него тоже нет произвольной пересылки, только TLS+HTTP до его собственного
+    сервера-моста. Поэтому если `proxy['ptype']` не 'socks5'/'http',
+    _build_curl_proxy_arg() вернёт None и эта функция просто откатывается на обычный
+    http_get() без прокси — ВМЕСТО того чтобы молча притворяться, что прокси
+    использован. Вызывающий код (scan()) отдельно один раз логирует/предупреждает,
+    если пользователь ввёл именно MTProto/нераспознанную строку, чтобы это не терялось.
+
+    Если прокси подходящего типа — пробуются (1) urllib с ProxyHandler (быстро, без
+    подпроцесса, но только для HTTP-прокси: сам urllib не умеет SOCKS5 без стороннего
+    pysocks, который не добавлен в зависимости проекта специально, чтобы не плодить
+    pip-пакеты ради того, что curl и так умеет "из коробки"), затем (2) curl --proxy
+    (умеет и SOCKS5, и HTTP; доступен на Windows 10/11 по умолчанию, как и везде в
+    http_get). В отличие от http_get, здесь curl пробуется НЕ только на Windows — тут
+    это основной рабочий способ, а не last-resort фолбэк."""
+    curl_proxy=_build_curl_proxy_arg(proxy)
+    if not curl_proxy:
+        return http_get(url, timeout)
+    errors=[]
+    headers={
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
+        'Accept':'text/plain,application/json,text/html,*/*',
+        'Accept-Language':'en-US,en;q=0.9',
+        'Cache-Control':'no-cache',
+    }
+    if proxy.get('ptype')=='http':
+        try:
+            auth=''
+            if proxy.get('user'):
+                auth=f"{urllib.parse.quote(proxy['user'],safe='')}:{urllib.parse.quote(proxy.get('password') or '',safe='')}@"
+            proxy_url=f"http://{auth}{proxy['server']}:{proxy['port']}"
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler({'http':proxy_url,'https':proxy_url}))
+            req=urllib.request.Request(url,headers=headers)
+            with opener.open(req,timeout=timeout) as r:
+                data=r.read()
+                if data: return data.decode('utf-8','replace')
+                raise RuntimeError('empty response')
+        except Exception as e:
+            msg=f'urllib+proxy: {type(e).__name__}: {e}'; errors.append(msg); log(f'HTTP(proxy) FAIL {msg}')
+    curl=shutil.which('curl.exe') or shutil.which('curl')
+    if curl:
+        try:
+            cp=subprocess.run([curl,'-L','--fail','--silent','--show-error','--max-time',str(max(5,int(timeout))),
+                                '-A',headers['User-Agent'],'-H','Accept: '+headers['Accept'],'--compressed',
+                                '--proxy',curl_proxy,url],
+                               stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout+3,**_subprocess_kwargs())
+            stderr=_decode_console_bytes(cp.stderr).strip()
+            log(f'HTTP(proxy) curl exit={cp.returncode} bytes={len(cp.stdout)} stderr={stderr[:1000]}')
+            if cp.returncode==0 and cp.stdout: return cp.stdout.decode('utf-8','replace')
+            errors.append('curl+proxy: '+(stderr or ('exit '+str(cp.returncode))))
+        except Exception as e:
+            msg=f'curl+proxy: {type(e).__name__}: {e}'; errors.append(msg); log(f'HTTP(proxy) FAIL {msg}', True)
+    else:
+        errors.append('curl+proxy: executable not found (нужен, чтобы использовать SOCKS5/HTTP-прокси)')
+        log('HTTP(proxy) curl executable not found')
+    err=' | '.join(errors[-6:])
+    log(f'HTTP(proxy) FINAL FAIL url={url} proxy={proxy["server"]}:{proxy["port"]}: {err}')
     raise RuntimeError(err)
 
 
@@ -613,48 +808,80 @@ def parse_typed_links(text,ptype):
     return list(out.values())
 
 
-def parse_proxies(text,include_other=False):
+def parse_proxies(text,include_other=False,types=None):
+    """Разбирает ссылки прокси из произвольного текста. `types` (v30) — набор видов,
+    которые нужно распознавать ('mtproto'/'socks5'/'http'/'web'); невыбранные виды
+    пропускаются. Если `types` не задан — прежнее поведение: всегда MTProto, а при
+    include_other=True ещё SOCKS5/HTTP/WEB."""
+    if types is None:
+        want={'mtproto'}|({'socks5','http','web'} if include_other else set())
+    else:
+        want=set(normalize_types(types))
     out={}
-    for m in TG_RE.finditer(text):
-        p=parse_proxy_link(m.group(0).rstrip('.,);'))
-        if p: out[_pkey(p)]=p
-    for m in re.finditer(r'\{[^{}]{0,1500}\}',text):
-        try:
-            o=json.loads(m.group(0))
-            if all(k in o for k in ('server','port','secret')):
-                p=parse_proxy_link('tg://proxy?server='+urllib.parse.quote(str(o['server']))+'&port='+str(int(o['port']))+'&secret='+urllib.parse.quote(str(o['secret'])))
-                if p: out[_pkey(p)]=p
-        except Exception: pass
-    # Common plain formats: host:port:secret or host port secret
-    for line in text.splitlines():
-        line=line.strip().strip(',')
-        m=re.match(r'^(?:mtproto://)?([^\s:]+):(\d{2,5}):([0-9a-fA-F]{16,})$',line)
-        if m:
-            p=parse_proxy_link(f'tg://proxy?server={urllib.parse.quote(m.group(1))}&port={m.group(2)}&secret={m.group(3)}')
+    if 'mtproto' in want:
+        for m in TG_RE.finditer(text):
+            p=parse_proxy_link(m.group(0).rstrip('.,);'))
             if p: out[_pkey(p)]=p
-    if include_other:
+        for m in re.finditer(r'\{[^{}]{0,1500}\}',text):
+            try:
+                o=json.loads(m.group(0))
+                if all(k in o for k in ('server','port','secret')):
+                    p=parse_proxy_link('tg://proxy?server='+urllib.parse.quote(str(o['server']))+'&port='+str(int(o['port']))+'&secret='+urllib.parse.quote(str(o['secret'])))
+                    if p: out[_pkey(p)]=p
+            except Exception: pass
+        # Common plain formats: host:port:secret or host port secret
+        for line in text.splitlines():
+            line=line.strip().strip(',')
+            m=re.match(r'^(?:mtproto://)?([^\s:]+):(\d{2,5}):([0-9a-fA-F]{16,})$',line)
+            if m:
+                p=parse_proxy_link(f'tg://proxy?server={urllib.parse.quote(m.group(1))}&port={m.group(2)}&secret={m.group(3)}')
+                if p: out[_pkey(p)]=p
+    if want&{'socks5','http'}:
         # Инлайновые socks5://.../http://... ссылки прямо в тексте (например, в
         # сообщении тг-канала вперемешку с обычными mtproto-ссылками) — только по явной
         # схеме-протоколу (finditer по всему тексту безопасен именно поэтому: ищем
         # конкретную подстроку "socks5://"/"http://", а не голый host:port где угодно).
         for scheme,ptype in (('socks5','socks5'),('http','http'),('https','http')):
+            if ptype not in want: continue
             for m in re.finditer(scheme+r'://(?:([^:@/\s]{1,64}):([^@/\s]{0,64})@)?([a-zA-Z0-9\.\-]{3,255}):(\d{2,5})',text,re.I):
                 user,pwd,host,port=m.groups()
                 p=_make_typed_proxy(host,port,ptype,user,pwd)
                 if p: out[_pkey(p)]=p
-        # Готовые tg://socks и tg://webproxy ссылки (см. комментарий выше у
-        # parse_socks_tg_link/parse_webproxy_link) — тоже только когда включены "другие
-        # виды прокси", как и всё остальное в этом блоке.
+    if 'socks5' in want:
+        # Готовые tg://socks ссылки (см. parse_socks_tg_link).
         for m in TG_SOCKS_RE.finditer(text):
             p=parse_socks_tg_link(m.group(0).rstrip('.,);'))
             if p: out[_pkey(p)]=p
+    if 'web' in want:
         for m in TG_WEBPROXY_RE.finditer(text):
             p=parse_webproxy_link(m.group(0).rstrip('.,);'))
             if p: out[_pkey(p)]=p
     return list(out.values())
 
 
-def fast_probe_get(url, timeout=4.0, max_bytes=262144):
+def parse_single_proxy_input(text):
+    """Разбирает ОДНУ запись «рабочего прокси», введённую пользователем в настройке
+    «Рабочий прокси для Telegram-источников» (пункт №1 обращения v29). Принимает любой
+    уже поддерживаемый программой формат ссылки: tg://proxy?server=...&port=...&secret=
+    ... (MTProto — технически не подходит для пересылки t.me-страниц, см. комментарий у
+    http_get_via_proxy, но распознаётся честно, а не как ошибка формата), tg://socks?
+    server=...&port=... (SOCKS5), socks5://[логин:пароль@]хост:порт,
+    http(s)://[логин:пароль@]хост:порт, либо просто "хост:порт" без схемы — такая
+    голая запись трактуется как SOCKS5 (самый типичный формат для универсального
+    прокси). Возвращает прокси-словарь (с 'ptype') или None, если строка пустая/не
+    распознана ни в одном из форматов."""
+    text=(text or '').strip()
+    if not text: return None
+    found=parse_proxies(text, include_other=True)
+    if found: return found[0]
+    m=re.match(r'^(?:([^:@/\s]{1,64}):([^@/\s]{0,64})@)?([a-zA-Z0-9\.\-]{3,255}):(\d{2,5})$', text)
+    if m:
+        user,pwd,host,port=m.groups()
+        return _make_typed_proxy(host,port,'socks5',user,pwd)
+    return None
+
+
+def fast_probe_get(url, timeout=4.0, max_bytes=262144, headers=None):
     """Single-attempt, no-retry, no-subprocess-fallback fetch used ONLY to probe
     discovery candidates, most of which are expected to 404/fail (that's normal: we're
     guessing filenames/repos). http_get()'s 2-attempt-with-sleep + curl/powershell
@@ -675,6 +902,7 @@ def fast_probe_get(url, timeout=4.0, max_bytes=262144):
             'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
             'Accept':'text/plain,application/json,text/html,*/*',
             'Accept-Language':'en-US,en;q=0.9',
+            **(headers or {}),
         })
         with urllib.request.urlopen(req,timeout=timeout) as r:
             data=r.read(max_bytes)
@@ -685,21 +913,210 @@ def fast_probe_get(url, timeout=4.0, max_bytes=262144):
 
 def _normalize_discovered_url(url):
     """Map a loosely-specified discovered URL/handle to something actually fetchable.
-    A bare Telegram channel link (t.me/<name>) is a JS app shell with no content when
-    fetched plainly — its public preview at t.me/s/<name> is the real HTML page with
-    recent posts, so that's what we probe instead."""
+    Ссылка на тг-канал (t.me/<имя>, t.me/s/<имя>, @имя и их псевдонимы telegram.me/
+    telegram.dog/tx.me) превращается в tgchannel://<имя> (v30) — этот псевдо-URL читается
+    единым механизмом fetch_telegram_channel_text, который сам выбирает рабочий маршрут
+    (прямой t.me / псевдоним домена / шлюз, см. tme_reachable) и листает историю канала.
+    Раньше такой кандидат опрашивался прямым запросом к t.me/s/<имя>, то есть вообще не
+    работал именно там, где t.me заблокирован."""
     try:
         u=url.strip()
-        m=re.match(r'^https?://t\.me/(?!s/|proxy)([A-Za-z0-9_]{4,})/?$', u, re.I)
-        if m: return f'https://t.me/s/{m.group(1)}'
+        m=re.match(r'^https?://(?:t\.me|telegram\.me|telegram\.dog|tx\.me)/(?:s/)?(?!proxy|socks|webproxy|joinchat|addstickers)([A-Za-z0-9_]{4,})/?(?:\d+/?)?$', u, re.I)
+        if m: return f'tgchannel://{m.group(1)}'
         m=re.match(r'^@([A-Za-z0-9_]{4,})$', u)
-        if m: return f'https://t.me/s/{m.group(1)}'
+        if m: return f'tgchannel://{m.group(1)}'
         return u
     except Exception:
         return url
 
 
-def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_LIMIT, stop_event=None, timeout=7.0):
+# ИСПРАВЛЕНО (v28, пункт №1 обращения — "улучшенный поиск всё ещё не ищет тг каналы").
+# Анализ нового debug-лога пользователя показал: это не баг в коде и не повторение
+# старой проблемы (см. комментарий ниже в fetch_telegram_channel_text про переход на
+# http_get в v27) — на этот раз http_get честно логирует КАЖДУЮ попытку, и видно, что
+# t.me не отвечает НИ ОДНИМ из 4 способов (2×urllib, curl, powershell) буквально
+# каждый раз, с таймаутом ~8с на способ, без единого успеха на протяжении всего лога
+# (несколько отдельных запусков сканирования). Такая картина (стабильные ТАЙМАУТЫ на
+# ВСЕХ способах, а не быстрые отказы/403) — типичный признак блокировки самого домена
+# t.me на уровне сети/провайдера/страны (DPI/SNI), а не проблемы в приложении; это
+# достаточно известное явление именно для доменов Telegram в отдельных странах.
+# Починить саму блокировку программа не может (это вне её контроля — не прокси-баг),
+# но раньше при такой блокировке на КАЖДЫЙ канал впустую тратилось ~30+ секунд (полная
+# цепочка http_get: 2×urllib + curl + powershell, все с таймаутом) — умноженное на
+# число каналов и число раундов дозапроса это съедало по несколько минут впустую.
+# Теперь перед первой попыткой читать канал делается ОДНА быстрая проверка (не полный
+# http_get — только чтобы понять "отвечает ли домен вообще"), и если она проваливается,
+# все дальнейшие попытки читать тг-каналы в этом сканировании пропускаются сразу, с
+# одной понятной строкой в логе — вместо того чтобы домучивать до конца заведомо
+# обречённую серию попыток. Результат кешируется на TME_PROBE_TTL секунд: достаточно,
+# чтобы не тратить время повторно внутри одного сканирования (в т.ч. между раундами
+# дозапроса), но не навсегда — если пользователь включит VPN посреди работы программы
+# или в начале следующего сканирования, свежая проверка это заметит (reset_tme_probe_
+# cache() дополнительно сбрасывает кеш в начале каждого нового scan()).
+TME_PROBE_TTL=120.0
+
+# ---------------------------------------------------------------------------
+# v30 (пункт №2 обращения): чтение Telegram-каналов БЕЗ прямого доступа к t.me.
+#
+# Проблема пользователя: Telegram у него работает ТОЛЬКО через MTProto-прокси, а
+# t.me (обычная веб-страница) с его сети недоступен — и «Улучшенный поиск» оставался
+# без тг-каналов. Прямой ответ «найти рабочий SOCKS5/HTTP» (v29) таким пользователям не
+# подходит: их мало и они сами часто недоступны. А MTProto-прокси технически не может
+# пересылать HTTPS (он пропускает только зашифрованный протокол Telegram до его серверов),
+# поэтому через найденный MTProto страницу t.me/s/<канал> не открыть — это не обходится.
+#
+# Что МОЖНО сделать честно — искать обходной МАРШРУТ до тех же публичных страниц каналов
+# (t.me/s/<канал>, их читает любой браузер без входа в аккаунт). Программа пробует по
+# очереди (параллельно, берёт первый рабочий по приоритету) и запоминает на сканирование:
+#   1) t.me напрямую (или через указанный «рабочий прокси» SOCKS5/HTTP);
+#   2) свой шлюз пользователя (если задан шаблон в поле «Рабочий прокси…», см.
+#      parse_gateway_template);
+#   3) официальные псевдонимы домена — telegram.me, telegram.dog, tx.me: блокировка по
+#      имени (SNI/DNS) часто бьёт только t.me;
+#   4) публичные «шлюзы-читалки» — сторонние сервисы, которые сами скачивают страницу и
+#      отдают её нам (r.jina.ai, allorigins, codetabs, corsproxy.io, RSSHub): для сети
+#      пользователя это обычный запрос к стороннему сайту, а не к Telegram.
+# Ограничения (честно): если заблокированы ВСЕ IP Telegram, пункт 3 не поможет (те же
+# адреса); шлюзы — сторонние бесплатные сервисы: могут быть перегружены/недоступны/
+# отдать капчу — поэтому КАЖДЫЙ ответ проверяется по содержимому (должны быть настоящие
+# посты канала), а не по коду 200. Через шлюз уходит только имя ПУБЛИЧНОГО канала
+# (отключается галочкой «Обходить блокировку t.me через публичные шлюзы»). Если ни
+# один маршрут не сработал — поиск по каналам честно пропускается, остаются GitHub и сайты.
+# ---------------------------------------------------------------------------
+TG_ALT_DOMAINS = ('telegram.me', 'telegram.dog', 'tx.me')
+TG_GATEWAYS = [
+    # (имя, вид, шаблон, доп. заголовки). {url}/{urlenc} — целевая страница, {ch} — канал.
+    ('r.jina.ai', 'wrap', 'https://r.jina.ai/{url}', {'X-Return-Format': 'html'}),
+    ('allorigins', 'wrap', 'https://api.allorigins.win/raw?url={urlenc}', None),
+    ('codetabs', 'wrap', 'https://api.codetabs.com/v1/proxy/?quest={urlenc}', None),
+    ('corsproxy.io', 'wrap', 'https://corsproxy.io/?url={urlenc}', None),
+    ('RSSHub', 'rss', 'https://rsshub.app/telegram/channel/{ch}', None),
+]
+TG_PROBE_CHANNEL = 'telegram'   # официальный канал Telegram — гарантированно существует и публичен
+_TG_ACCESS = {'proxy': None, 'gateway': None, 'use_gateways': True}
+_TME_PROBE_CACHE = {'ok': None, 'ts': 0.0, 'route': None, 'trace': ''}
+
+def reset_tme_probe_cache():
+    _TME_PROBE_CACHE['ok'] = None; _TME_PROBE_CACHE['ts'] = 0.0
+    _TME_PROBE_CACHE['route'] = None; _TME_PROBE_CACHE['trace'] = ''
+
+def parse_gateway_template(text):
+    """Шаблон своего шлюза из поля «Рабочий прокси для Telegram-источников»: URL со
+    вставками {url} (адрес страницы t.me/s/<канал>, как есть), {urlenc} (он же,
+    URL-кодированный) или {ch} (имя канала). Пример: https://my.example/fetch?u={urlenc}.
+    Возвращает строку-шаблон или None, если это не шаблон."""
+    t = (text or '').strip()
+    if re.match(r'^https?://', t, re.I) and any(k in t for k in ('{url}', '{urlenc}', '{ch}')):
+        return t
+    return None
+
+def configure_tg_access(proxy=None, gateway=None, use_gateways=True):
+    """Задаёт параметры доступа к Telegram на ближайшее сканирование (вызывается из
+    scan()) и сбрасывает кеш маршрута."""
+    _TG_ACCESS['proxy'] = proxy; _TG_ACCESS['gateway'] = gateway; _TG_ACCESS['use_gateways'] = bool(use_gateways)
+    reset_tme_probe_cache()
+
+def build_tg_routes(proxy=None, gateway=None, use_gateways=True):
+    """Упорядоченный список маршрутов чтения t.me/s/<канал> (см. описание выше)."""
+    px = proxy if (proxy and _build_curl_proxy_arg(proxy)) else None
+    routes = [{'name': 't.me через рабочий прокси' if px else 't.me', 'kind': 'direct', 'domain': 't.me', 'proxy': px, 'tpl': None, 'headers': None}]
+    if gateway:
+        kind = 'rss' if ('{ch}' in gateway and '{url' not in gateway) else 'wrap'
+        routes.append({'name': 'свой шлюз', 'kind': kind, 'domain': 't.me', 'proxy': None, 'tpl': gateway, 'headers': None})
+    for d in TG_ALT_DOMAINS:
+        routes.append({'name': d, 'kind': 'direct', 'domain': d, 'proxy': px, 'tpl': None, 'headers': None})
+    if use_gateways:
+        for name, kind, tpl, hdrs in TG_GATEWAYS:
+            routes.append({'name': name, 'kind': kind, 'domain': 't.me', 'proxy': None, 'tpl': tpl, 'headers': hdrs})
+    return routes
+
+def _route_url(route, channel, before=None):
+    target = f"https://{route['domain']}/s/{channel}" + (f'?before={before}' if before else '')
+    if route['kind'] == 'direct': return target
+    tpl = route['tpl']
+    if route['kind'] == 'rss': return tpl.replace('{ch}', channel)
+    return tpl.replace('{urlenc}', urllib.parse.quote(target, safe='')).replace('{url}', target).replace('{ch}', channel)
+
+def _looks_like_channel_page(text, channel):
+    """Ответ — настоящая страница/лента канала (а не заглушка провайдера, капча или
+    JSON-ошибка шлюза): есть разметка постов t.me либо ссылки вида <канал>/<id поста>."""
+    if not text: return False
+    return ('tgme_widget_message' in text) or bool(re.search(re.escape(channel)+r'/\d+', text))
+
+def _route_get(route, channel, before, timeout):
+    """Полная загрузка одной страницы выбранным маршрутом (с надёжными повторами http_get)."""
+    url = _route_url(route, channel, before)
+    if route['kind'] == 'direct':
+        if route.get('proxy') and _build_curl_proxy_arg(route['proxy']):
+            return http_get_via_proxy(url, timeout, route['proxy'])
+        return http_get(url, timeout)
+    if route.get('headers'):
+        return http_get(url, timeout, extra_headers=route['headers'])
+    return http_get(url, timeout)
+
+def _route_probe_one(route, timeout):
+    """Быстрая однопопыточная проверка маршрута на канале TG_PROBE_CHANNEL; True только
+    если вернулись настоящие посты. Никогда не бросает исключений."""
+    try:
+        url = _route_url(route, TG_PROBE_CHANNEL, None)
+        if route['kind'] == 'direct' and route.get('proxy') and _build_curl_proxy_arg(route['proxy']):
+            text = http_get_via_proxy(url, timeout, route['proxy'])
+        elif route.get('headers'):
+            text = fast_probe_get(url, timeout, max_bytes=300000, headers=route['headers'])
+        else:
+            text = fast_probe_get(url, timeout, max_bytes=300000)
+        return _looks_like_channel_page(text, TG_PROBE_CHANNEL)
+    except Exception:
+        return False
+
+def probe_tg_routes(routes, timeout=3.0, gateway_timeout=6.0):
+    """Проверяет все маршруты ПАРАЛЛЕЛЬНО и возвращает (первый_рабочий_по_приоритету |
+    None, трасса). Если рабочий — прямой t.me, ответ приходит за один круг сети, не
+    дожидаясь медленных шлюзов."""
+    if not routes: return None, []
+    ex = ThreadPoolExecutor(max_workers=len(routes))
+    try:
+        futs = [ex.submit(_route_probe_one, r, timeout if r['kind'] == 'direct' else gateway_timeout) for r in routes]
+        deadline = time.time() + gateway_timeout + 1.0
+        trace = []
+        for r, f in zip(routes, futs):
+            try: ok = bool(f.result(timeout=max(0.1, deadline - time.time())))
+            except Exception: ok = False
+            trace.append(f"{r['name']}={'ok' if ok else 'нет'}")
+            if ok: return r, trace
+        return None, trace
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+def tme_reachable(timeout=3.0, proxy=None):
+    """Есть ли хоть один рабочий маршрут чтения тг-каналов (см. описание выше). Результат
+    (и выбранный маршрут) кешируется на TME_PROBE_TTL секунд и сбрасывается в начале
+    каждого сканирования (reset_tme_probe_cache). `proxy` — рабочий SOCKS5/HTTP-прокси
+    (если не задан, берётся из configure_tg_access)."""
+    now = time.time()
+    if _TME_PROBE_CACHE['ok'] is not None and (now - _TME_PROBE_CACHE['ts']) < TME_PROBE_TTL:
+        return _TME_PROBE_CACHE['ok']
+    px = proxy if proxy is not None else _TG_ACCESS['proxy']
+    routes = build_tg_routes(px, _TG_ACCESS['gateway'], _TG_ACCESS['use_gateways'])
+    route, trace = probe_tg_routes(routes, timeout)
+    ok = route is not None
+    _TME_PROBE_CACHE.update(ok=ok, ts=now, route=route, trace=', '.join(trace))
+    if ok:
+        log(f"TME PROBE OK: чтение тг-каналов через «{route['name']}» (проверено: {', '.join(trace)})")
+    else:
+        log(f"TME PROBE FAIL: ни один маршрут чтения тг-каналов не сработал ({', '.join(trace)}) — похоже на блокировку Telegram на уровне сети/страны или временную недоступность; поиск по тг-каналам пропускается на ближайшие {TME_PROBE_TTL:.0f}с, остаются GitHub и сайты")
+    return ok
+
+def describe_tg_access():
+    """Короткая человекочитаемая строка для статуса: каким путём читаются тг-каналы."""
+    if _TME_PROBE_CACHE['ok'] is None: return ''
+    if _TME_PROBE_CACHE['ok']:
+        r = _TME_PROBE_CACHE.get('route') or {}
+        return f"Telegram-каналы читаются через: {r.get('name', 't.me')}"
+    return 'Telegram-каналы недоступны ни одним маршрутом — ищем по GitHub и сайтам'
+
+
+def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_LIMIT, stop_event=None, timeout=7.0, proxy=None):
     """Скачивает текст последних `max_messages` сообщений ОТКРЫТОГО (публичного)
     Telegram-канала через его статическую веб-версию (t.me/s/<channel>) — доступно
     без входа в Telegram, так же, как в обычном браузере (пункты №2 и №3 обращения
@@ -723,12 +1140,23 @@ def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_L
     это иногда делают боты — см. обращение, пункт №3), содержимое такого вложения
     НЕДОСТУПНО через публичную веб-версию — его может скачать только сам клиент
     Telegram (нужен вход в аккаунт/Bot API). Такие вложения только отмечаются в логе
-    (видно имя файла), чтобы это не терялось молча, но не скачиваются."""
+    (видно имя файла), чтобы это не терялось молча, но не скачиваются.
+
+    `proxy` (пункт №1 обращения v29) — если задан рабочий SOCKS5/HTTP-прокси, ВСЕ
+    обращения к t.me (включая саму проверку доступности) идут через него — см.
+    tme_reachable/http_get_via_proxy. MTProto-/WEB-прокси технически не подходят для
+    этого (см. http_get_via_proxy) — тогда функция ведёт себя так, будто proxy не
+    задан."""
+    if not tme_reachable(proxy=proxy):
+        return '',[]
+    # v30: выбранный при проверке маршрут (прямой t.me / псевдоним домена / шлюз). Если
+    # кеша маршрута нет (проверка подменена, как в тестах) — обычный прямой t.me.
+    route=_TME_PROBE_CACHE.get('route') or {'name':'t.me','kind':'direct','domain':'t.me','proxy':proxy if (proxy and _build_curl_proxy_arg(proxy)) else None,'tpl':None,'headers':None}
     collected=[]; seen_ids=set(); before=None; pages=0
     while len(seen_ids)<max_messages and pages<TELEGRAM_CHANNEL_MAX_PAGES:
         if stop_event is not None and stop_event.is_set(): break
         pages+=1
-        url=f'https://t.me/s/{channel}'+(f'?before={before}' if before else '')
+        url=_route_url(route,channel,before)
         # РЕАЛЬНЫЙ БАГ, пойманный по логу пользователя: раньше здесь использовался
         # fast_probe_get — он намеренно быстрый и МОЛЧА проглатывает любую ошибку (одна
         # попытка urllib, без retry и без curl/powershell-фолбэка), что годится для
@@ -741,7 +1169,7 @@ def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_L
         # curl/powershell-фолбэк, который в том же логе успешно вытаскивал другие
         # источники) — и он честно пишет в лог, на каком именно шаге и почему не вышло.
         try:
-            page_html=http_get(url,timeout)
+            page_html=_route_get(route,channel,before,timeout)
         except Exception as e:
             log(f'TGCHAN page FAIL channel={channel} url={url}: {e}')
             page_html=None
@@ -750,6 +1178,8 @@ def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_L
         collected.append(page_html)
         ids=[int(x) for x in re.findall(re.escape(channel)+r'/(\d+)',page_html)]
         if not ids: break
+        if route['kind']=='rss':  # лента RSS — одна порция без листания назад
+            seen_ids.update(ids); break
         new_ids=set(ids)-seen_ids
         seen_ids.update(ids)
         if not new_ids: break  # страница не принесла новых id — дальше в истории канала пусто
@@ -762,25 +1192,35 @@ def fetch_telegram_channel_text(channel, max_messages=TELEGRAM_CHANNEL_MESSAGE_L
     # "&amp;" содержит свой собственный "&" не на том месте — проверено тестом на
     # синтетической странице, без этого НИ ОДНА ссылка из реальной HTML-страницы
     # канала не разобралась бы, хотя visuально текст выглядит нормально).
-    full_text=html.unescape('\n'.join(collected))
+    full_text='\n'.join(collected)
+    # До трёх раундов: у RSS-лент (маршрут RSSHub) HTML внутри <description> экранирован
+    # дважды (XML + HTML), у обычной страницы канала достаточно одного.
+    for _ in range(3):
+        un=html.unescape(full_text)
+        if un==full_text: break
+        full_text=un
     for fn in re.findall(r'tgme_widget_message_document_title["\'][^>]*>\s*([^<]{1,200})<',full_text):
         log(f'TGCHAN вложение-файл обнаружено, но недоступно без входа в Telegram (пропущено): channel={channel} file={fn.strip()}')
     linked_files=[]
     for u in re.findall(r'href="(https?://[^"]+?\.(?:txt|json))"',full_text,re.I):
         if u not in linked_files: linked_files.append(u)
-    log(f'TGCHAN channel={channel} pages={pages} messages~={len(seen_ids)} linked_files={len(linked_files)}')
+    log(f'TGCHAN channel={channel} route={route["name"]} pages={pages} messages~={len(seen_ids)} linked_files={len(linked_files)}')
     return full_text,linked_files
 
 
-def _load_channel_source(tgchannel_url, include_other=False):
+def _load_channel_source(tgchannel_url, include_other=False, proxy=None):
     """Разворачивает псевдо-URL tgchannel://<канал> (см. STATIC_SOURCES/ENHANCED_SEED_
     CHANNELS) в реальный текст: сообщения канала + содержимое всех .txt/.json-файлов,
     на которые в сообщениях нашлись прямые ссылки (но не настоящие Telegram-вложения —
     см. ограничение в fetch_telegram_channel_text). Возвращает единый текстовый блок,
     который дальше разбирает parse_proxies — так же, как при обычной загрузке
-    источника по http_get."""
+    источника по http_get.
+
+    `proxy` — рабочий прокси (пункт №1 обращения v29) для самого чтения канала (t.me);
+    найденные внутри сообщений ссылки на .txt/.json-файлы — произвольные сайты, не
+    t.me, поэтому грузятся как обычно, напрямую, без прокси."""
     channel=tgchannel_url[len('tgchannel://'):]
-    text,linked_files=fetch_telegram_channel_text(channel)
+    text,linked_files=fetch_telegram_channel_text(channel, proxy=proxy)
     parts=[text]
     for fu in linked_files[:10]:  # разумный предел — не тащить десятки вложенных файлов за один источник
         try: parts.append(http_get(fu,8))
@@ -797,7 +1237,7 @@ def _interruptible_sleep(stop_event, seconds):
         time.sleep(min(0.2,max(0.0,end-time.time())))
 
 
-def _github_search_once(q, timeout):
+def _github_search_once(q, timeout, github_token=None):
     """One raw GitHub repo-search request, bypassing fast_probe_get's broad exception
     swallow so a rate-limit response (HTTP 403/429 — the unauthenticated Search API is
     capped at roughly 10 requests/minute total across ALL queries) can be told apart from
@@ -805,14 +1245,28 @@ def _github_search_once(q, timeout):
     is None on success or a short tag ('rate_limited', 'http_404', 'URLError', ...) on
     failure — discover_sources() uses this to decide whether retrying later is worth it,
     instead of silently treating "rate-limited" and "no results at all" the same way (which
-    is what made search look random and finish early regardless of the time budget)."""
+    is what made search look random and finish early regardless of the time budget).
+
+    `github_token` (пункт №2 обращения v28 — "лимит GitHub API ужасно раздражает"):
+    единственный ЧЕСТНЫЙ способ обойти этот лимит — не обходной трюк, а настоящая
+    аутентификация. У GitHub Search API лимит без входа — ~10 запросов/мин ОБЩИЙ на всех
+    пользователей интернета сразу (отсюда и жалоба — он делится не только между
+    раундами дозапроса одного пользователя, а вообще со всеми); с личным токеном
+    (Personal Access Token, без каких-либо прав/scope — токен нужен только для того,
+    чтобы запрос засчитался «от конкретного аккаунта», а не анонимно) лимит поднимается
+    примерно до 30 запросов/мин — втрое. Токен необязателен (поле в настройках
+    «GitHub token»); если его нет, поведение не меняется — ровно как просил
+    пользователь ("если обойти не получится, оставим как есть")."""
     url=('https://api.github.com/search/repositories?q='+urllib.parse.quote(q)+
          '&sort=updated&order=desc&per_page=100')
     try:
-        req=urllib.request.Request(url,headers={
+        headers={
             'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
             'Accept':'application/vnd.github+json',
-        })
+        }
+        if github_token:
+            headers['Authorization']='token '+github_token
+        req=urllib.request.Request(url,headers=headers)
         with urllib.request.urlopen(req,timeout=timeout) as r:
             data=r.read(3_000_000)  # см. комментарий у fast_probe_get про обрезание при per_page=100
         return json.loads(data.decode('utf-8','replace')).get('items',[]), None
@@ -844,7 +1298,7 @@ def _ddg_search_urls(query, max_results=6, timeout=4.0):
         return []
 
 
-def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=frozenset(), time_budget=None):
+def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=frozenset(), time_budget=None, github_token=None, telegram_proxy=None, types=None):
     """Discover public sources that publish MTProto proxy lists, at runtime.
 
     Normal mode (enhanced=False) searches GitHub only: several precise `topic:` and
@@ -881,16 +1335,36 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
     `exclude` — a set of raw URLs to skip even if (re-)found — used when scan() calls this
     a second time to top up a short-on-proxies scan with fresh sources, so the top-up round
     doesn't waste its whole time budget re-probing the exact same sources as the first round.
+
+    `github_token` — опциональный личный токен GitHub (настройка «GitHub token»), поднимающий
+    лимит Search API с ~10 до ~30 запросов/мин (см. комментарий у _github_search_once). None
+    по умолчанию — поведение без токена не меняется.
+
+    `telegram_proxy` — опциональный рабочий SOCKS5/HTTP-прокси (настройка «Рабочий прокси
+    для Telegram-источников», пункт №1 обращения v29) для чтения tgchannel:// кандидатов
+    (t.me), когда сам t.me недоступен напрямую — см. fetch_telegram_channel_text.
+
+    `types` (v30) — какие виды прокси искать ('mtproto'/'socks5'/'http'/'web'; по умолчанию
+    только MTProto, как раньше). Для каждого вида выполняются ТОЛЬКО его запросы GitHub
+    (DISCOVERY_QUERIES_BY_TYPE), перебираются ТОЛЬКО его имена файлов
+    (COMMON_FILENAMES_BY_TYPE), а кандидат принимается, лишь если по его СОДЕРЖИМОМУ он
+    годится хотя бы для одного выбранного вида (sample_matches_type). У принятых «голых»
+    списков host:port запоминается тип (_SOURCE_TYPE_HINTS) — по нему scan() разбирает файл
+    через parse_typed_links. Запросы GitHub, уже выполненные успешно, повторно не
+    отправляются (ответ был бы тем же — это лишь тратило лимит API); повторяются только
+    упёршиеся в rate-limit.
     """
     start=time.time()
+    types=normalize_types(types) or ('mtproto',)
     if time_budget is None:
         time_budget=DISCOVERY_TIME_BUDGET_ENHANCED if enhanced else DISCOVERY_TIME_BUDGET
     deadline=start+time_budget
     sources=[]; seen_urls=set(exclude); seen_repos=set(); lock=threading.Lock()
+    repo_types={}  # репозиторий -> виды, по запросам которых он найден
 
     def time_left(): return deadline-time.time()
 
-    def try_add(raw_url, label):
+    def try_add(raw_url, label, qtype=None):
         if stop_event.is_set() or time_left()<=0: return False
         with lock:
             if raw_url in seen_urls or len(sources)>=target: return False
@@ -902,24 +1376,39 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
             # никогда не содержал "secret=" и отбраковывался этой же проверкой ниже.
             # Теперь берём настоящий текст последних сообщений через ту же функцию,
             # что и обычная загрузка источников (см. _load_channel_source) — единое
-            # место, которое действительно умеет читать сообщения канала.
+            # место, которое действительно умеет читать сообщения канала (и выбирать
+            # рабочий маршрут до него, см. tme_reachable).
             try:
                 sample,_=fetch_telegram_channel_text(raw_url[len('tgchannel://'):],
                                                        max_messages=TELEGRAM_CHANNEL_MESSAGE_LIMIT,
                                                        stop_event=stop_event,
-                                                       timeout=min(8.0,max(3.0,time_left())))
+                                                       timeout=min(8.0,max(3.0,time_left())),
+                                                       proxy=telegram_proxy)
             except Exception:
                 sample=None
         else:
             sample=fast_probe_get(raw_url, min(4.0,max(1.5,time_left())))
         if not sample: return False
-        if sample.count('secret=')<2 and len(re.findall(r't\.me/proxy',sample))<2:
-            return False
+        # Годится ли содержимое хотя бы для одного ВЫБРАННОГО вида (сначала — вид запроса,
+        # по которому кандидата нашли).
+        order=([qtype] if qtype in types else [])+[t for t in types if t!=qtype]
+        accepted=next((t for t in order if sample_matches_type(sample,t)),None)
+        if accepted is None: return False
+        hint=None
+        if accepted in ('socks5','http') and not sample_matches_type(sample,'mtproto'):
+            guess=_guess_list_type(raw_url)
+            if guess=='socks4': return False   # SOCKS4 не поддерживается проверкой — не берём
+            hint=guess if guess in types else accepted
         with lock:
             if len(sources)>=target: return False
             sources.append((raw_url,label)); n=len(sources)
+            if hint: _SOURCE_TYPE_HINTS[raw_url]=hint
         status_cb(f'{"Улучшенный" if enhanced else "Динамический"} поиск источников… найдено {n} из {target}')
         return True
+
+    # Какие запросы GitHub ещё нужно выполнить: (запрос, вид). Успешно выполненные
+    # убираются и не повторяются (см. docstring).
+    pending_queries=[(q,t) for t in types for q in DISCOVERY_QUERIES_BY_TYPE.get(t,[])]
 
     probe_pool=ThreadPoolExecutor(max_workers=DISCOVERY_PROBE_WORKERS)
     try:
@@ -928,54 +1417,64 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
             attempt+=1
             if stop_event.is_set() or time_left()<=0 or len(sources)>=target: break
 
-            # ---- 1) все GitHub-запросы — параллельно, одним пулом ----
+            # ---- 1) все (оставшиеся) GitHub-запросы — параллельно, одним пулом ----
             per_query_timeout=min(6.0,max(2.0,time_left()))
-            results=list(probe_pool.map(lambda q:_github_search_once(q,per_query_timeout), DISCOVERY_QUERIES))
-            new_repos=[]; rate_limited_count=0
-            for items,reason in results:
+            results=list(probe_pool.map(lambda qt:_github_search_once(qt[0],per_query_timeout,github_token), pending_queries))
+            new_repos=[]; rate_limited_count=0; still_pending=[]
+            for (q,qt),(items,reason) in zip(pending_queries,results):
+                if reason: still_pending.append((q,qt))   # rate-limit/сетевой сбой — попробуем снова
                 if reason=='rate_limited': rate_limited_count+=1
                 for r in items:
                     full=r.get('full_name')
-                    if full and full not in seen_repos:
+                    if not full: continue
+                    repo_types.setdefault(full,[])
+                    if qt not in repo_types[full]: repo_types[full].append(qt)
+                    if full not in seen_repos:
                         seen_repos.add(full); new_repos.append((full, r.get('default_branch') or 'main'))
+            n_queries=len(pending_queries); pending_queries=still_pending
             if rate_limited_count:
-                log(f'DISCOVERY github rate-limited on {rate_limited_count}/{len(DISCOVERY_QUERIES)} запросов (попытка {attempt}) — это нормально, не ошибка: подождём и попробуем снова')
-            log(f'DISCOVERY github repos found={len(new_repos)} (всего уникальных={len(seen_repos)}) attempt={attempt} elapsed={time.time()-start:.1f}s')
+                log(f'DISCOVERY github rate-limited on {rate_limited_count}/{n_queries} запросов (попытка {attempt}) — это нормально, не ошибка: подождём и повторим только их')
+            log(f'DISCOVERY github repos found={len(new_repos)} (всего уникальных={len(seen_repos)}) attempt={attempt} types={",".join(types)} queries_left={len(pending_queries)} elapsed={time.time()-start:.1f}s')
 
             # ---- 2) собираем кандидатов ТОЛЬКО из новых репозиториев этой попытки ----
-            candidates=[]
+            candidates=[]  # (url, label, вид запроса)
             for full,branch in new_repos:
                 b=urllib.parse.quote(branch,safe='')
-                for path in COMMON_PROXY_FILENAMES:
-                    candidates.append((f'https://raw.githubusercontent.com/{full}/{b}/{path}', full+':'+path))
+                paths_seen=set()
+                for t in repo_types.get(full,['mtproto']):
+                    for path in COMMON_FILENAMES_BY_TYPE.get(t,[]):
+                        if path in paths_seen: continue
+                        paths_seen.add(path)
+                        candidates.append((f'https://raw.githubusercontent.com/{full}/{b}/{path}', full+':'+path, t))
             random.shuffle(candidates)  # не тратим весь дедлайн на первые N репозиториев
             candidates=candidates[:MAX_DISCOVERY_CANDIDATES]
 
+            ddg_failed=False
             if enhanced:
                 if attempt==1:  # seed-каналы/сайты не меняются между попытками — добавляем раз
                     for ch in ENHANCED_SEED_CHANNELS:
-                        candidates.append((f'tgchannel://{ch}', 'tg:'+ch))
+                        candidates.append((f'tgchannel://{ch}', 'tg:'+ch, None))
                     for site in ENHANCED_SEED_WEBSITES:
-                        candidates.append((site, site))
-                if time_left()>6:
-                    found_urls=[]
-                    for urls in probe_pool.map(lambda q:_ddg_search_urls(q,6,min(4.0,time_left())), ENHANCED_SEARCH_QUERIES):
-                        found_urls.extend(urls)
-                    for u in dict.fromkeys(found_urls):
-                        nu=_normalize_discovered_url(u)
-                        candidates.append((nu, nu))
+                        candidates.append((site, site, None))
+                    if time_left()>6:
+                        found_urls=[]
+                        for urls in probe_pool.map(lambda q:_ddg_search_urls(q,6,min(4.0,time_left())), ENHANCED_SEARCH_QUERIES):
+                            found_urls.extend(urls)
+                        for u in dict.fromkeys(found_urls):
+                            nu=_normalize_discovered_url(u)
+                            candidates.append((nu, nu, None))
 
             # try_add() сам отфильтрует уже проверенные URL через seen_urls, но отсекаем их
             # здесь заранее, чтобы не засорять пул futures заведомо повторными кандидатами
             # между попытками.
-            candidates=[(u,l) for u,l in candidates if u not in seen_urls]
+            candidates=[c for c in candidates if c[0] not in seen_urls]
             log(f'DISCOVERY candidates built attempt={attempt} count={len(candidates)} total_repos_seen={len(seen_repos)}')
 
             # ---- 3) пробуем кандидатов этой попытки одним общим пулом, ограничено дедлайном ----
             futures=[]
-            for raw,label in candidates:
+            for raw,label,qt in candidates:
                 if stop_event.is_set() or time_left()<=0 or len(sources)>=target: break
-                futures.append(probe_pool.submit(try_add, raw, label))
+                futures.append(probe_pool.submit(try_add, raw, label, qt))
             try:
                 for f in as_completed(futures, timeout=max(1.0,time_left()+3)):
                     if stop_event.is_set() or len(sources)>=target: break
@@ -986,10 +1485,15 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
 
             if stop_event.is_set() or len(sources)>=target: break
             if time_left()<=5 or attempt>=MAX_DISCOVERY_INTERNAL_RETRIES: break
+            if not pending_queries:
+                # Все запросы GitHub выполнены успешно, seed/веб-поиск тоже один раз —
+                # повторять нечего (раньше здесь крутился повтор тех же запросов вхолостую).
+                log(f'DISCOVERY нечего повторять: все запросы выполнены (attempt={attempt})')
+                break
 
             # Бэкофф перед повторной попыткой: если причиной был rate-limit — ждём дольше
-            # (лимит GitHub сбрасывается по скользящему окну примерно за минуту), если
-            # кандидатов просто не нашлось — короткой паузы достаточно, это не ошибка.
+            # (лимит GitHub сбрасывается по скользящему окну примерно за минуту), иначе
+            # (сетевой сбой) короткой паузы достаточно.
             backoff=min(time_left()-2, 12.0 if rate_limited_count else 3.0)
             if backoff>0.3:
                 status_cb(f'{"Улучшенный" if enhanced else "Динамический"} поиск источников… найдено {len(sources)} из {target}, повтор через {backoff:.0f} с ({"лимит GitHub API" if rate_limited_count else "ищем ещё"})…')
@@ -998,7 +1502,7 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
         probe_pool.shutdown(wait=False, cancel_futures=True)
 
     elapsed=time.time()-start
-    log(f'DISCOVERY done enhanced={enhanced} found={len(sources)}/{target} elapsed={elapsed:.1f}s attempts={attempt}')
+    log(f'DISCOVERY done enhanced={enhanced} types={",".join(types)} found={len(sources)}/{target} elapsed={elapsed:.1f}s attempts={attempt}')
     if len(sources)<target:
         status_cb(f'Поиск источников завершён за {elapsed:.0f} с — найдено {len(sources)} из {target}.')
     return sources
@@ -1467,6 +1971,20 @@ def tcp_probe(p,timeout=2.5):
 
 
 STABILITY_TICK=0.5  # fixed per spec: check ping every 0.5s while routing real traffic through the proxy
+# ИСПРАВЛЕНО (v28, пункт №3 обращения — "дозапросы вообще бесполезны, даже 5 раундов
+# ничего не находят"): раньше каждый тик стабильности обязан был уложиться в
+# ЖЁСТКО ЗАШИТЫЕ 100мс, НИКАК не связанные с полем "Макс. ping" в настройках — даже
+# если пользователь явно указал, что согласен на ping до 1000мс. Анализ debug-лога
+# пользователя показал, что это и есть настоящая причина проблемы: почти ВСЕ (1094 из
+# 1137, ~96%) отброшенных на стабильности прокси отбраковывались именно по "ping > 100
+# мс", хотя их реальный ping (127-145мс) укладывался в указанный пользователем лимит
+# 1000мс с большим запасом — то есть дозапрос действительно находил новые рабочие
+# источники и новые кандидаты (это видно по логу: "new_sources=15 new_candidates=160"),
+# но скрытый отдельный порог стабильности отбрасывал практически всё до того, как
+# прокси попадал в список найденных. Теперь порог стабильности берётся из того же
+# самого "Макс. ping", который пользователь уже настраивает — отдельного скрытого
+# значения больше нет.
+STABILITY_MAX_PING_DEFAULT=100.0  # запасное значение, если вызывающий код не передал max_ping явно
 
 # Проверка "других видов прокси" (пункт №1 обращения) — так же, как MTProto-проверка
 # выше делает настоящий протокольный запрос, а не просто проверяет открытый порт, эти
@@ -1654,23 +2172,28 @@ def check_proxy_online(p,timeout=2.6):
 # поддерживают — см. STABILITY_SUPPORTED_METHODS и диспетчер stability_test() ниже.
 STABILITY_SUPPORTED_METHODS={'mtproto','mtproto-tls','socks5','http','web'}
 
-def stability_test(p,seconds,stop_event,abort_event):
+def stability_test(p,seconds,stop_event,abort_event,max_ping=STABILITY_MAX_PING_DEFAULT):
     """Диспетчер: выбирает реализацию проверки стабильности по типу прокси. MTProto
     использует специализированную версию с одним персистентным соединением
     (_stability_test_mtproto); SOCKS5/HTTP/WEB — общую версию с повторной полной
     проверкой на каждом тике (_stability_test_generic, см. его docstring про то, почему
-    выбран именно такой подход, а не один держащийся открытым сырой сокет)."""
+    выбран именно такой подход, а не один держащийся открытым сырой сокет).
+
+    `max_ping` — потолок задержки одного тика (в мс), выше которого прокси отбрасывается;
+    scan() передаёт сюда то же самое значение, что пользователь указал в «Макс. ping» (см.
+    комментарий у STABILITY_MAX_PING_DEFAULT про то, почему раньше здесь был отдельный
+    зашитый порог 100мс, не связанный с этой настройкой)."""
     ptype=p.get('ptype','mtproto')
     if ptype=='socks5':
-        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_socks5(p,2.6))
+        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_socks5(p,2.6),max_ping)
     if ptype=='http':
-        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_http_proxy(p,2.6))
+        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_http_proxy(p,2.6),max_ping)
     if ptype=='web':
-        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_web_proxy(p,2.6))
-    return _stability_test_mtproto(p,seconds,stop_event,abort_event)
+        return _stability_test_generic(p,seconds,stop_event,abort_event,lambda:_check_web_proxy(p,2.6),max_ping)
+    return _stability_test_mtproto(p,seconds,stop_event,abort_event,max_ping)
 
 
-def _stability_test_generic(p,seconds,stop_event,abort_event,check_once):
+def _stability_test_generic(p,seconds,stop_event,abort_event,check_once,max_ping=STABILITY_MAX_PING_DEFAULT):
     """Стабильность для SOCKS5/HTTP/WEB.
 
     У MTProto стабильность держит ОДНО соединение открытым и гоняет через него
@@ -1686,11 +2209,11 @@ def _stability_test_generic(p,seconds,stop_event,abort_event,check_once):
     у MTProto, чисто измерять round-trip одного тика через HTTP keep-alive) для
     SOCKS5/HTTP/WEB устроено сложнее и легче сломать, чем повторить уже проверенную
     полную проверку. Критерий приёма — тот же, что и у MTProto: каждый тик обязан
-    пройти и уложиться в 100мс, иначе прокси сразу отбрасывается, не дожидаясь конца
-    срока."""
+    пройти и уложиться в `max_ping` мс (настройка «Макс. ping»), иначе прокси сразу
+    отбрасывается, не дожидаясь конца срока."""
     NET_GATE.acquire()
     started=time.perf_counter(); checks=0; worst=0.0
-    log(f'STABILITY START {p["server"]}:{p["port"]} seconds={seconds} ptype={p.get("ptype")}')
+    log(f'STABILITY START {p["server"]}:{p["port"]} seconds={seconds} ptype={p.get("ptype")} max_ping={max_ping}')
     try:
         deadline=started+seconds; next_tick=started
         while True:
@@ -1702,9 +2225,9 @@ def _stability_test_generic(p,seconds,stop_event,abort_event,check_once):
                 log(f'STABILITY REJECT {p["server"]}:{p["port"]}: {err}')
                 return False,err or 'проверка не прошла'
             checks+=1; worst=max(worst,ms); p['ping']=round(ms,1)
-            if ms>100.0:
-                log(f'STABILITY REJECT {p["server"]}:{p["port"]} ping={ms:.1f}ms > 100ms')
-                return False,f'ping {ms:.1f} ms > 100 ms'
+            if ms>max_ping:
+                log(f'STABILITY REJECT {p["server"]}:{p["port"]} ping={ms:.1f}ms > max_ping={max_ping}ms')
+                return False,f'ping {ms:.1f} ms > {max_ping:.0f} ms'
             next_tick+=STABILITY_TICK
             remaining=next_tick-time.perf_counter()
             if remaining>0: time.sleep(min(remaining,max(0,deadline-time.perf_counter())))
@@ -1719,12 +2242,13 @@ def _stability_test_generic(p,seconds,stop_event,abort_event,check_once):
         NET_GATE.release()
 
 
-def _stability_test_mtproto(p,seconds,stop_event,abort_event):
+def _stability_test_mtproto(p,seconds,stop_event,abort_event,max_ping=STABILITY_MAX_PING_DEFAULT):
     """Run the whole stability check on ONE persistent MTProxy connection, sending real
     Telegram MTProto traffic (req_pq_multi) every STABILITY_TICK seconds for the full
     requested duration. Returns (passed, detail). The caller only adds the proxy to the
     user-visible list if this returns True, so a proxy is fully verified BEFORE it is
-    handed to the user, and any tick above 100ms aborts and drops it immediately rather
+    handed to the user, and any tick above `max_ping` ms (the user's own "Макс. ping"
+    setting — see STABILITY_MAX_PING_DEFAULT) aborts and drops it immediately rather
     than waiting out the rest of the duration.
 
     Acquires NET_GATE for the ENTIRE duration (connect + every tick), not just for
@@ -1737,7 +2261,7 @@ def _stability_test_mtproto(p,seconds,stop_event,abort_event):
     NET_GATE.acquire()
     started=time.perf_counter(); checks=0; worst=0.0
     s=enc=dec=None
-    log(f'STABILITY START {p["server"]}:{p["port"]} seconds={seconds}')
+    log(f'STABILITY START {p["server"]}:{p["port"]} seconds={seconds} max_ping={max_ping}')
     try:
         s,enc,dec,mode=_mtproxy_session_open(p,timeout=4.0)
         mid_state={'last':0}
@@ -1752,9 +2276,9 @@ def _stability_test_mtproto(p,seconds,stop_event,abort_event):
                 log(f'STABILITY REJECT {p["server"]}:{p["port"]}: {e}')
                 return False,str(e)
             checks+=1; worst=max(worst,ms); p['ping']=round(ms,1)
-            if ms>100.0:
-                log(f'STABILITY REJECT {p["server"]}:{p["port"]} ping={ms:.1f}ms > 100ms')
-                return False,f'ping {ms:.1f} ms > 100 ms'
+            if ms>max_ping:
+                log(f'STABILITY REJECT {p["server"]}:{p["port"]} ping={ms:.1f}ms > max_ping={max_ping}ms')
+                return False,f'ping {ms:.1f} ms > {max_ping:.0f} ms'
             next_tick+=STABILITY_TICK
             remaining=next_tick-time.perf_counter()
             if remaining>0: time.sleep(min(remaining,max(0,deadline-time.perf_counter())))
@@ -1902,9 +2426,9 @@ class App:
         self.settings={'country':'Все страны','provider':'Все провайдеры','max_ping':1000,'limit':10,'interval':1.0,
                        'auto_ping':True,'only_ok':False,'stability':False,'stability_seconds':3.0,
                        'dynamic_target':40,'concurrency':64,'dynamic_sources':False,'enhanced_search':False,
-                       'discovery_time':25,'topup_rounds':MAX_TOPUP_ROUNDS}
+                       'discovery_time':25,'topup_rounds':MAX_TOPUP_ROUNDS,'github_token':'','telegram_proxy':'','tg_gateways':True,'ptype_mtproto':True,'ptype_socks5':False,'ptype_http':False,'ptype_web':False}
         self._filter_state={}
-        log(f'APP START version=v27 crypto_backend={"cryptography" if _HAS_CRYPTOGRAPHY else "pure-python"} icons_backend={"pillow" if _HAS_PIL else "none(fallback text)"} python={sys.version.split()[0]} platform={platform.platform()} executable={sys.executable} log={LOG_FILE}')
+        log(f'APP START version=v30 crypto_backend={"cryptography" if _HAS_CRYPTOGRAPHY else "pure-python"} icons_backend={"pillow" if _HAS_PIL else "none(fallback text)"} python={sys.version.split()[0]} platform={platform.platform()} executable={sys.executable} log={LOG_FILE}')
         self._build_styles(); self._build_ui()
         self.load_settings(silent=True)  # restore whatever the person saved last time, quietly
         root.after(80,self.poll); threading.Thread(target=self.ping_loop,daemon=True).start()
@@ -2098,18 +2622,24 @@ class App:
         self.dynamic_sources=tk.BooleanVar(value=False); self.dynamic_target_var=tk.StringVar(value='40'); self.concurrency_var=tk.StringVar(value='64')
         self.enhanced_search=tk.BooleanVar(value=False); self.discovery_time_var=tk.StringVar(value='25')
         self.topup_rounds_var=tk.StringVar(value=str(MAX_TOPUP_ROUNDS))
-        self.other_proxy_types=tk.BooleanVar(value=False)
+        # v30: четыре независимые галочки видов прокси вместо одной «другие виды прокси»
+        self.ptype_vars={t:tk.BooleanVar(value=(t=='mtproto')) for t in PROXY_TYPES}
+        self.tg_gateways=tk.BooleanVar(value=True)
+        self.github_token_var=tk.StringVar(value='')
+        self.telegram_proxy_var=tk.StringVar(value='')
         self.auto_ping=tk.BooleanVar(value=True); self.only_ok=tk.BooleanVar(value=False)
         self.stability_enabled=tk.BooleanVar(value=False); self.stability_seconds_var=tk.StringVar(value='3')
         self.lock_order=tk.BooleanVar(value=False); self._order_counter=0
 
-        # Карточка 1 — источники и фильтр результатов
-        card1=self._card(params,0,0,'🔎','Источники и фильтр результатов',accent=COLORS['blue'])
-        self.country_cb=self._combo(card1,1,0,'Страна',self.country,['Все страны'])
-        self.provider_cb=self._combo(card1,1,1,'Провайдер',self.provider,['Все провайдеры'])
-        self.country_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters()); self.provider_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters())
+        # Карточка 1 — источники (фильтрация результатов перенесена на вкладку
+        # "Сканирование" — пункт №2 обращения v29: "в блоке настроек оставить
+        # исключительно настройки"; Страна/Провайдер/Скрывать offline не влияют на то,
+        # ЧТО сканируется, только на то, что из уже найденного показывается, поэтому это
+        # фильтры результатов, а не настройки сканирования, и логичнее жить рядом с самой
+        # таблицей результатов).
+        card1=self._card(params,0,0,'🔎','Источники',accent=COLORS['blue'])
         self._entry(card1,2,0,'Нужно прокси',self.limit_var,'шт.',help_text='Сколько рабочих прокси нужно найти и показать в списке. Поиск продолжится, пока не наберётся это количество (или пока не закончатся источники/кандидаты).')
-        self._entry(card1,2,1,'Макс. ping',self.max_ping_var,'ms',help_text='Прокси с задержкой (ping) выше этого значения не попадают в список результатов.')
+        self._entry(card1,2,1,'Макс. ping',self.max_ping_var,'ms',help_text='Прокси с задержкой (ping) выше этого значения не попадают в список результатов. Это же значение теперь используется и как порог проверки стабильности (см. карточку «Автоматика и производительность»).')
         ttk.Separator(card1,orient='horizontal').grid(row=3,column=0,columnspan=2,sticky='ew',pady=(13,11))
         ttk.Label(card1,text='Поиск источников в интернете',style='Caption.TLabel').grid(row=4,column=0,columnspan=2,sticky='w',pady=(0,7))
         self._check(card1,5,0,'Динамический поиск источников',self.dynamic_sources,command=self._on_dynamic_toggle,help_text='Встроенный список источников НЕ используется — вместо него сканер сам найдёт свежие списки прокси на GitHub за несколько секунд (см. «Источников (авто)» ниже; жёсткий лимит времени не даёт поиску растянуться на часы).',padx=(0,0))
@@ -2117,8 +2647,29 @@ class App:
         self._entry(card1,6,0,'Источников (авто)',self.dynamic_target_var,'шт.',help_text='Сколько источников списков прокси попытаться найти автоматически в интернете. Чем больше — тем больше кандидатов на прокси в итоге получится (время поиска при этом задаётся отдельным параметром справа, не этим).')
         self._entry(card1,6,1,'Время поиска',self.discovery_time_var,'сек.',help_text='Жёсткий лимит времени (в секундах, от 5 до 600 — т.е. до 10 минут) на поиск источников — задаётся отдельно от «Источников (авто)». Поиск останавливается по истечении этого времени, даже если нужное количество источников ещё не набралось; либо раньше, если набралось. Больше времени — выше шанс найти все запрошенные источники (в т.ч. пережить временный лимит запросов GitHub), но и дольше ждать.')
         self._entry(card1,7,0,'Попыток дозапроса',self.topup_rounds_var,'раз',help_text='Если при включённом динамическом поиске рабочих прокси набралось меньше, чем указано в «Нужно прокси», программа ищет ЕЩЁ источники (не повторяя уже проверенные) и проверяет новые прокси из них. Это число — сколько раз повторить такой дозапрос, прежде чем остановиться с тем, что нашлось. 0 — дозапрос отключён, один проход.')
+        gh_box=ttk.Frame(card1,style='Panel.TFrame'); gh_box.grid(row=7,column=1,sticky='ew',pady=(0,10)); gh_box.columnconfigure(0,weight=1)
+        gh_cap=ttk.Frame(gh_box,style='Panel.TFrame'); gh_cap.grid(row=0,column=0,sticky='w',pady=(0,5)); ttk.Label(gh_cap,text='GitHub token',style='Muted.TLabel').pack(side='left')
+        self._help_badge(gh_cap,'Необязательно. Поиск источников на GitHub без входа ограничен ~10 запросами в минуту НА ВСЕХ пользователей интернета сразу — отсюда задержки при динамическом/улучшенном поиске и особенно при дозапросе. Личный токен GitHub (создаётся на github.com → Settings → Developer settings → Personal access tokens; права/scope не нужны — токен нужен только для аутентификации запроса) поднимает лимит примерно до 30 запросов в минуту. Без токена всё работает как раньше, просто медленнее при частых сканированиях подряд.').pack(side='left',padx=(5,0))
+        ttk.Entry(gh_box,textvariable=self.github_token_var,width=22,show='•').grid(row=1,column=0,sticky='ew')
         ttk.Separator(card1,orient='horizontal').grid(row=8,column=0,columnspan=2,sticky='ew',pady=(13,11))
-        self._check(card1,9,0,'Включить другие виды прокси',self.other_proxy_types,command=self.sync_settings,help_text='Кроме MTProto программа дополнительно ищет и проверяет SOCKS5-, HTTP- и WEB-прокси, каждый своей настоящей проверкой: у SOCKS5/HTTP — полное рукопожатие протокола и CONNECT до core.telegram.org; у WEB — настоящее TLS-рукопожатие (с проверкой сертификата) и HTTP-запрос к серверу прокси (сам протокол «моста» до Telegram у этого нового типа Telegram публично не документирует, поэтому дальше TLS+HTTPS честно не проверяется). Подключение в Telegram Desktop в один клик работает для SOCKS5 (tg://socks) и WEB (tg://webproxy) — так же, как для MTProto. У HTTP готовой ссылки для подключения в Telegram нет (ограничение самого Telegram), показывается адрес для ручной настройки. Проверка стабильности теперь тоже считается для всех этих типов, не только для MTProto. По умолчанию выключено — ищутся только MTProto-прокси, как раньше.',padx=(0,0))
+        ttk.Label(card1,text='Виды прокси для поиска',style='Caption.TLabel').grid(row=9,column=0,columnspan=2,sticky='w',pady=(0,7))
+        types_row=ttk.Frame(card1,style='Panel.TFrame'); types_row.grid(row=10,column=0,columnspan=2,sticky='w')
+        _type_help={
+            'mtproto':'Основной вид для Telegram: список MTProto-прокси ищется в готовых/найденных источниках и тг-каналах; проверка — настоящее MTProto-рукопожатие (в том числе FakeTLS).',
+            'socks5':'Ищутся готовые и найденные списки SOCKS5; проверка — полное рукопожатие протокола и CONNECT до core.telegram.org. Подключение в Telegram Desktop в один клик (tg://socks). Бесплатных SOCKS5 мало, и многие недоступны из-за блокировок.',
+            'http':'Ищутся списки HTTP-прокси; проверка — CONNECT до core.telegram.org. У HTTP нет готовой ссылки подключения в Telegram (ограничение самого Telegram) — показывается адрес для ручной настройки.',
+            'web':'Ищутся ссылки tg://webproxy (новый тип Telegram). Публичных списков почти нет — ссылки берутся из тг-каналов и найденных страниц (удобнее с динамическим/улучшенным поиском). Проверка — настоящее TLS-рукопожатие и HTTPS-запрос; сам «мост» Telegram не документирует, поэтому глубже честно не проверяется.',
+        }
+        for _ci,_t in enumerate(PROXY_TYPES):
+            self._check(types_row,0,_ci,PTYPE_LABELS[_t],self.ptype_vars[_t],command=self.sync_settings,help_text=_type_help[_t],padx=(0,14))
+        ttk.Label(card1,text='Ищутся, проверяются и показываются только отмеченные виды. Для каждого — свои источники и свой поиск.',style='Muted.TLabel',wraplength=460,justify='left').grid(row=11,column=0,columnspan=2,sticky='w',pady=(0,2))
+        ttk.Separator(card1,orient='horizontal').grid(row=12,column=0,columnspan=2,sticky='ew',pady=(13,11))
+        tp_box=ttk.Frame(card1,style='Panel.TFrame'); tp_box.grid(row=13,column=0,columnspan=2,sticky='ew',pady=(0,10)); tp_box.columnconfigure(0,weight=1)
+        tp_cap=ttk.Frame(tp_box,style='Panel.TFrame'); tp_cap.grid(row=0,column=0,sticky='w',pady=(0,5)); ttk.Label(tp_cap,text='Рабочий прокси или шлюз для Telegram-источников',style='Muted.TLabel').pack(side='left')
+        self._help_badge(tp_cap,'Необязательно. Нужно, если домен t.me недоступен напрямую с вашей сети, а Telegram у вас работает только через MTProto-прокси. ВАЖНО: MTProto-прокси пересылает лишь протокол Telegram и технически не может открыть веб-страницу t.me/s/канал, поэтому именно он сюда не подходит. Программа сама пробует обходные маршруты (см. галочку ниже), а здесь можно задать свой: (1) SOCKS5/HTTP-прокси — tg://socks?server=...&port=..., socks5://[логин:пароль@]хост:порт, http://[логин:пароль@]хост:порт или «хост:порт» (= SOCKS5); (2) шаблон своего шлюза — адрес вашего сервиса со вставкой {urlenc} (адрес страницы канала, закодированный), {url} (как есть) или {ch} (имя канала), например https://мой-сервер/fetch?u={urlenc}. GitHub и другие источники через это поле не идут — только чтение тг-каналов.').pack(side='left',padx=(5,0))
+        ttk.Entry(tp_box,textvariable=self.telegram_proxy_var,width=46).grid(row=1,column=0,sticky='ew')
+        gw_wrap=ttk.Frame(tp_box,style='Panel.TFrame'); gw_wrap.grid(row=2,column=0,sticky='w',pady=(8,0))
+        self._check(gw_wrap,0,0,'Обходить блокировку t.me через зеркала и публичные шлюзы',self.tg_gateways,command=self.sync_settings,help_text='Если t.me недоступен напрямую, программа по очереди пробует: официальные псевдонимы домена (telegram.me, telegram.dog, tx.me), затем публичные сервисы-«читалки» (r.jina.ai, allorigins, codetabs, corsproxy.io, RSSHub), которые сами скачивают публичную страницу канала и отдают её вам — для вашей сети это обычный запрос к стороннему сайту, а не к Telegram. Каждый ответ проверяется по содержимому (должны быть настоящие посты). Наружу уходит только имя ПУБЛИЧНОГО канала. Не поможет, если заблокированы все адреса Telegram и недоступны сами шлюзы — тогда поиск идёт по GitHub и сайтам. Снимите галочку, если не хотите обращаться к сторонним сервисам.',padx=(0,0))
 
         self.card1_outer=card1.master
 
@@ -2127,13 +2678,12 @@ class App:
         self._entry(card2,1,0,'Параллельность проверок',self.concurrency_var,'потоков',help_text='Сколько прокси проверяются одновременно (в сумме для всех видов проверки — TCP/MTProto, стабильность, geo). Меньше значение — медленнее сканирование, но меньше нагрузка на ваш интернет-канал; полезно на слабом или нестабильном интернете. Больше значение — быстрее на хорошем канале.')
         self._entry(card2,1,1,'Интервал ping',self.interval_var,'сек.',help_text='Как часто (в секундах) автопроверка обновляет пинг уже показанных прокси.')
         self._check(card2,2,0,'Автопроверка ping',self.auto_ping,command=self.sync_settings,help_text='Раз в «Интервал ping» секунд заново проверяет пинг уже найденных прокси из списка, чтобы видеть, если какой-то из них отвалился.',padx=(0,0))
-        self._check(card2,2,1,'Скрывать offline',self.only_ok,command=self.apply_filters,help_text='Не показывать в списке прокси, которые сейчас не отвечают.',padx=(0,0))
         ttk.Separator(card2,orient='horizontal').grid(row=3,column=0,columnspan=2,sticky='ew',pady=(13,11))
         ttk.Label(card2,text='Проверка стабильности перед выдачей прокси',style='Caption.TLabel').grid(row=4,column=0,columnspan=2,sticky='w',pady=(0,7))
-        self._check(card2,5,0,'Проверка стабильности',self.stability_enabled,command=self.sync_settings,help_text='Перед тем как показать прокси в списке, сканер держит с ним одно соединение и гоняет через него настоящий Telegram-трафик каждые 0.5 сек в течение указанного времени. Если хоть раз пинг поднимется выше 100 мс — прокси отбрасывается и в список не попадает.',padx=(0,0))
+        self._check(card2,5,0,'Проверка стабильности',self.stability_enabled,command=self.sync_settings,help_text='Перед тем как показать прокси в списке, сканер держит с ним одно соединение (или для SOCKS5/HTTP/WEB — повторяет полную проверку) и гоняет через него настоящий Telegram-трафик каждые 0.5 сек в течение указанного времени. Если хоть раз пинг поднимется выше «Макс. ping» (см. выше) — прокси отбрасывается и в список не попадает. ИСПРАВЛЕНО в v28: раньше здесь был отдельный, не связанный с «Макс. ping» зашитый порог 100 мс — из-за него дозапрос находил новые источники, но почти все их прокси всё равно браковались на этом шаге, даже если «Макс. ping» был указан гораздо выше.',padx=(0,0))
         self._entry(card2,5,1,'Секунд',self.stability_seconds_var,'сек.',help_text='Сколько секунд длится проверка стабильности одного прокси.')
         self._check(card2,6,0,'Зафиксировать порядок',self.lock_order,command=self.render_current,help_text='Не переставлять строки местами при обновлении пинга — удобно, если вы наводите курсор на список во время автопроверки.',padx=(0,0))
-        ttk.Label(card2,text='Ping>100мс в любой момент — прокси сразу отсеивается.',style='Muted.TLabel',wraplength=230,justify='left').grid(row=6,column=1,sticky='w',pady=(3,0))
+        ttk.Label(card2,text='Ping выше «Макс. ping» в любой момент — прокси сразу отсеивается.',style='Muted.TLabel',wraplength=230,justify='left').grid(row=6,column=1,sticky='w',pady=(3,0))
         self.card2_outer=card2.master
 
     def _build_tab_scan(self,parent):
@@ -2171,12 +2721,29 @@ class App:
         # как и просили: "таблица результатов на всю страницу" ----------
         rp_outer=ttk.Frame(f,style='Panel.TFrame'); rp_outer.grid(row=2,column=0,sticky='nsew'); rp_outer.columnconfigure(1,weight=1); rp_outer.rowconfigure(0,weight=1)
         tk.Frame(rp_outer,bg=COLORS['green'],width=3).grid(row=0,column=0,sticky='ns')
-        rp=ttk.Frame(rp_outer,style='Panel.TFrame',padding=(17,15,17,16)); rp.grid(row=0,column=1,sticky='nsew'); rp.rowconfigure(1,weight=1); rp.columnconfigure(0,weight=1)
+        rp=ttk.Frame(rp_outer,style='Panel.TFrame',padding=(17,15,17,16)); rp.grid(row=0,column=1,sticky='nsew'); rp.rowconfigure(2,weight=1); rp.columnconfigure(0,weight=1)
         rtop=ttk.Frame(rp,style='Panel.TFrame'); rtop.grid(row=0,column=0,sticky='ew',pady=(0,11)); rtop.columnconfigure(1,weight=1)
         head=ttk.Frame(rtop,style='Panel.TFrame'); head.grid(row=0,column=0,sticky='w')
         ttk.Label(head,text='📋',style='CardIcon.TLabel').pack(side='left'); ttk.Label(head,text='Результаты',style='CardTitle.TLabel').pack(side='left',padx=(8,0))
         self.status=ttk.Label(rtop,text='Готово',style='StatusPill.TLabel'); self.status.grid(row=0,column=2,sticky='e')
-        self.table=ttk.Frame(rp,style='Panel.TFrame'); table=self.table; table.grid(row=1,column=0,sticky='nsew'); table.rowconfigure(0,weight=1); table.columnconfigure(0,weight=1)
+
+        # ---------- компактная фильтрация результатов (пункт №2 обращения v29:
+        # "фильтрацию перенести на страницу сканирования... в блоке настроек оставить
+        # исключительно настройки") — Страна/Провайдер/Скрывать offline раньше жили на
+        # вкладке "Настройка"; это фильтры уже НАЙДЕННОГО списка (апдейтят сразу
+        # render() через apply_filters), а не параметры самого сканирования, поэтому
+        # логичнее держать их прямо над таблицей, которую они фильтруют — и компактно,
+        # в одну строку, без подписей-заголовков и плашек-подсказок, как в карточках
+        # настроек. ---------- #
+        fbar=ttk.Frame(rp,style='Panel.TFrame'); fbar.grid(row=1,column=0,sticky='ew',pady=(0,9))
+        ttk.Label(fbar,text='Фильтр:',style='Muted.TLabel').pack(side='left',padx=(0,6))
+        self.country_cb=ttk.Combobox(fbar,textvariable=self.country,values=['Все страны'],state='readonly',width=14)
+        self.country_cb.pack(side='left',padx=(0,6)); self.country_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters())
+        self.provider_cb=ttk.Combobox(fbar,textvariable=self.provider,values=['Все провайдеры'],state='readonly',width=17)
+        self.provider_cb.pack(side='left',padx=(0,10)); self.provider_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters())
+        ttk.Checkbutton(fbar,text='Скрывать offline',variable=self.only_ok,command=self.apply_filters).pack(side='left')
+
+        self.table=ttk.Frame(rp,style='Panel.TFrame'); table=self.table; table.grid(row=2,column=0,sticky='nsew'); table.rowconfigure(0,weight=1); table.columnconfigure(0,weight=1)
         cols=('type','country','provider','host','port','ping','source','status'); self.tree=ttk.Treeview(table,columns=cols,show='headings',selectmode='extended'); heads={'type':'Тип','country':'Страна','provider':'Провайдер / ASN','host':'Сервер','port':'Порт','ping':'Ping','source':'Источник','status':'Статус'}
         for c in cols:self.tree.heading(c,text=heads[c])
         widths={'type':78,'country':150,'provider':220,'host':240,'port':65,'ping':90,'source':105,'status':185}
@@ -2314,7 +2881,7 @@ class App:
         except: discovery_time=25
         try: topup_rounds=max(0,min(5,int(self.topup_rounds_var.get())))
         except: topup_rounds=MAX_TOPUP_ROUNDS
-        self.settings.update(interval=interval,limit=limit,max_ping=max_ping,auto_ping=self.auto_ping.get(),only_ok=self.only_ok.get(),country=self.country.get(),provider=self.provider.get(),stability=self.stability_enabled.get(),stability_seconds=stability_seconds,dynamic_target=dynamic_target,concurrency=concurrency,dynamic_sources=self.dynamic_sources.get(),enhanced_search=self.enhanced_search.get(),discovery_time=discovery_time,topup_rounds=topup_rounds,other_proxy_types=self.other_proxy_types.get())
+        self.settings.update(interval=interval,limit=limit,max_ping=max_ping,auto_ping=self.auto_ping.get(),only_ok=self.only_ok.get(),country=self.country.get(),provider=self.provider.get(),stability=self.stability_enabled.get(),stability_seconds=stability_seconds,dynamic_target=dynamic_target,concurrency=concurrency,dynamic_sources=self.dynamic_sources.get(),enhanced_search=self.enhanced_search.get(),discovery_time=discovery_time,topup_rounds=topup_rounds,tg_gateways=self.tg_gateways.get(),**{'ptype_'+t:self.ptype_vars[t].get() for t in PROXY_TYPES},github_token=self.github_token_var.get().strip(),telegram_proxy=self.telegram_proxy_var.get().strip())
         self.stability_seconds_var.set(str(stability_seconds).rstrip('0').rstrip('.') if stability_seconds%1 else str(int(stability_seconds)))
         self.interval_var.set(str(interval)); self.limit_var.set(str(limit)); self.max_ping_var.set(str(max_ping)); self.dynamic_target_var.set(str(dynamic_target)); self.concurrency_var.set(str(concurrency)); self.discovery_time_var.set(str(discovery_time)); self.topup_rounds_var.set(str(topup_rounds))
         if self.all_results:self.render(self.all_results)
@@ -2325,7 +2892,8 @@ class App:
               'max_ping':self.max_ping_var.get(),'interval':self.interval_var.get(),
               'dynamic_sources':self.dynamic_sources.get(),'dynamic_target':self.dynamic_target_var.get(),
               'enhanced_search':self.enhanced_search.get(),'discovery_time':self.discovery_time_var.get(),
-              'topup_rounds':self.topup_rounds_var.get(),'other_proxy_types':self.other_proxy_types.get(),
+              'topup_rounds':self.topup_rounds_var.get(),'tg_gateways':self.tg_gateways.get(),**{'ptype_'+t:self.ptype_vars[t].get() for t in PROXY_TYPES},
+              'github_token':self.github_token_var.get().strip(),'telegram_proxy':self.telegram_proxy_var.get().strip(),
               'concurrency':self.concurrency_var.get(),'auto_ping':self.auto_ping.get(),'only_ok':self.only_ok.get(),
               'stability_enabled':self.stability_enabled.get(),'stability_seconds':self.stability_seconds_var.get(),
               'lock_order':self.lock_order.get()}
@@ -2358,7 +2926,12 @@ class App:
             if 'enhanced_search' in data: self.enhanced_search.set(bool(data['enhanced_search']))
             if 'discovery_time' in data: self.discovery_time_var.set(str(data['discovery_time']))
             if 'topup_rounds' in data: self.topup_rounds_var.set(str(data['topup_rounds']))
-            if 'other_proxy_types' in data: self.other_proxy_types.set(bool(data['other_proxy_types']))
+            # v30: миграция — файл от v≤29 хранит одну галочку other_proxy_types
+            _en=enabled_types_from_settings(data)
+            for _t in PROXY_TYPES: self.ptype_vars[_t].set(_t in _en)
+            if 'tg_gateways' in data: self.tg_gateways.set(bool(data['tg_gateways']))
+            if 'github_token' in data: self.github_token_var.set(str(data['github_token']))
+            if 'telegram_proxy' in data: self.telegram_proxy_var.set(str(data['telegram_proxy']))
             self._sync_enhanced_availability()
             if 'concurrency' in data: self.concurrency_var.set(str(data['concurrency']))
             if 'auto_ping' in data: self.auto_ping.set(bool(data['auto_ping']))
@@ -2376,7 +2949,11 @@ class App:
     def start(self):
         if self.scan_running:return
         log('SCAN START requested')
-        self.sync_settings(); self.scan_settings=dict(self.settings); self.scan_dynamic_sources=bool(self.dynamic_sources.get()); self.scan_enhanced_search=bool(self.enhanced_search.get()) and self.scan_dynamic_sources; self.clear(); self.stop_event.clear(); self.scan_running=True; self.scan_btn.config(state='disabled'); self.stop_btn.config(state='normal'); self.export_btn.config(state='disabled')
+        self.sync_settings()
+        if not enabled_types_from_settings(self.settings):
+            messagebox.showwarning(APP_TITLE,'Не выбран ни один вид прокси. Отметьте хотя бы один (MTProto, SOCKS5, HTTP или WEB) в настройках, в блоке «Виды прокси для поиска».')
+            return
+        self.scan_settings=dict(self.settings); self.scan_dynamic_sources=bool(self.dynamic_sources.get()); self.scan_enhanced_search=bool(self.enhanced_search.get()) and self.scan_dynamic_sources; self.clear(); self.stop_event.clear(); self.scan_running=True; self.scan_btn.config(state='disabled'); self.stop_btn.config(state='normal'); self.export_btn.config(state='disabled')
         # См. _progress_heartbeat: во время долгих "тихих" участков проверки (когда много
         # прокси одновременно виснут на таймауте и подряд какое-то время не приходит ни
         # одного тика прогресса) полоса раньше выглядела зависшей, хотя сканирование на
@@ -2407,18 +2984,49 @@ class App:
 
     def scan(self):
         try:
+            reset_tme_probe_cache()  # свежая проверка доступности t.me на каждое новое сканирование (см. комментарий у tme_reachable)
             log(f'SCAN begin dynamic={self.scan_dynamic_sources} settings={self.scan_settings}')
             concurrency=int(self.scan_settings.get('concurrency',64) or 64)
             global NET_GATE; NET_GATE=threading.Semaphore(max(1,concurrency))  # один общий лимит на все сетевые проверки этого скана (см. комментарий у NET_GATE)
             dynamic_target=int(self.scan_settings.get('dynamic_target',40) or 40)
             enhanced=bool(self.scan_enhanced_search)
-            # Пункт №1 обращения: "Включить другие виды прокси" — если включено, помимо
-            # обычных mtproto-источников ВСЕГДА (и в статичном, и в динамическом режиме)
-            # дополнительно загружаются готовые типизированные списки SOCKS5/HTTP/WEB
-            # (см. OTHER_PROXY_SOURCES), а инлайновые socks5://.../http://... ссылки,
-            # встреченные в тексте обычных источников/тг-каналов, тоже распознаются
-            # (см. parse_proxies(..., include_other=...)) — вместо отбрасывания как мусор.
-            include_other=bool(self.scan_settings.get('other_proxy_types',False))
+            # v30 (пункт №1 обращения): вместо одной галочки «другие виды прокси» — выбор
+            # по видам (MTProto/SOCKS5/HTTP/WEB). Ищутся, разбираются, проверяются и
+            # показываются ТОЛЬКО выбранные виды; у каждого свои готовые списки и свой
+            # динамический поиск (см. TYPED_STATIC_SOURCES, discover_sources(types=...)).
+            types=normalize_types(enabled_types_from_settings(self.scan_settings)) or ('mtproto',)
+            include_other=any(t!='mtproto' for t in types)  # есть ли вообще не-MTProto виды
+            log(f'SCAN types={",".join(types)}')
+            github_token=(self.scan_settings.get('github_token') or '').strip() or None
+            # Пункт №1 обращения v29: "подключение к telegram можно осуществлять через
+            # рабочий прокси... касается всех telegram источников" — парсим ОДИН раз в
+            # начале сканирования (не на каждый t.me-запрос) и используем везде, где
+            # программа читает t.me (см. tme_reachable/fetch_telegram_channel_text).
+            telegram_proxy_text=(self.scan_settings.get('telegram_proxy') or '').strip()
+            # v30: в этом же поле можно задать не прокси, а шаблон СВОЕГО шлюза чтения
+            # (URL с {url}/{urlenc}/{ch}) — см. parse_gateway_template.
+            tg_gateway=parse_gateway_template(telegram_proxy_text)
+            telegram_proxy=parse_single_proxy_input(telegram_proxy_text) if (telegram_proxy_text and not tg_gateway) else None
+            if tg_gateway:
+                log(f'TG-GATEWAY: используется свой шлюз {tg_gateway[:100]}')
+            elif telegram_proxy_text and not telegram_proxy:
+                log(f'TG-PROXY: не удалось распознать формат «{telegram_proxy_text[:80]}» — прокси для t.me не используется')
+                self.q.put(('status','Рабочий прокси для Telegram-источников не распознан — работаем без него (см. лог).'))
+            elif telegram_proxy and telegram_proxy.get('ptype') not in ('socks5','http'):
+                log(f'TG-PROXY: указан {telegram_proxy.get("ptype")}-прокси {telegram_proxy["server"]}:{telegram_proxy["port"]} — такой тип технически не может пересылать произвольный HTTPS-трафик (только SOCKS5/HTTP могут), продолжаем без прокси для t.me')
+                self.q.put(('status',f'Указан {telegram_proxy.get("ptype")}-прокси — он не подходит для чтения t.me (нужен SOCKS5/HTTP), работаем без него.'))
+                telegram_proxy=None
+            elif telegram_proxy:
+                log(f'TG-PROXY: используется {telegram_proxy["ptype"]}-прокси {telegram_proxy["server"]}:{telegram_proxy["port"]} для чтения t.me-источников')
+            # v30 (пункт №2): шаблон своего шлюза в том же поле + галочка публичных шлюзов;
+            # настраиваем маршруты чтения t.me и проверяем их ОДИН раз в начале.
+            configure_tg_access(proxy=telegram_proxy,gateway=tg_gateway,use_gateways=bool(self.scan_settings.get('tg_gateways',True)))
+            if enhanced or not self.scan_dynamic_sources:  # тг-каналы читаются только в этих режимах
+                self.q.put(('status','Проверяю доступ к Telegram-каналам (прямой, через зеркала и шлюзы)…'))
+                tme_reachable(proxy=telegram_proxy)
+                tg_note=describe_tg_access()
+                if tg_note:
+                    log('TG-ACCESS '+tg_note); self.q.put(('status',tg_note))
             used_source_urls=set()  # сырые URL уже опробованных источников — чтобы "дозапрос" не тратил время на повтор тех же находок
             if self.scan_dynamic_sources:
                 # Требование: при включённом динамическом поиске встроенный список НЕ
@@ -2426,20 +3034,25 @@ class App:
                 # реально найдёт сама.
                 discovery_time=float(self.scan_settings.get('discovery_time',25) or 25)
                 self.q.put(('status',f'{"Улучшенный" if enhanced else "Динамический"} поиск источников (цель: {dynamic_target}, до {discovery_time:.0f} с)…'))
-                discovered=discover_sources(self.stop_event,lambda s:self.q.put(('status',s)),target=dynamic_target,enhanced=enhanced,time_budget=discovery_time)
+                discovered=discover_sources(self.stop_event,lambda s:self.q.put(('status',s)),target=dynamic_target,enhanced=enhanced,time_budget=discovery_time,github_token=github_token,telegram_proxy=telegram_proxy,types=types)
                 used_source_urls.update(url for url,_ in discovered)
                 sources=[(name,url) for url,name in discovered]
                 log(f'DYNAMIC-ONLY sources discovered={len(sources)} enhanced={enhanced} (встроенный список не используется)')
                 self.q.put(('status',f'Источников найдено {("улучшенным" if enhanced else "динамическим")} поиском: {len(sources)}…'))
-                if not sources and not include_other and not self.stop_event.is_set():
+                if not sources and not typed_sources_for(types) and not self.stop_event.is_set():
                     raise RuntimeError('Не удалось найти источники динамически за отведённое время. Если это повторилось сразу после предыдущего сканирования — вероятно, временно исчерпан лимит запросов к GitHub API (он общий у всех, без входа в аккаунт, и сбрасывается примерно через минуту): подождите и повторите. Либо попробуйте увеличить «Время поиска» или «Источников (авто)», включить «Улучшенный поиск», либо отключить динамический поиск, чтобы использовать встроенный список.')
             else:
-                sources=STATIC_SOURCES[:]
+                # MTProto-списки берём только если MTProto выбран; тг-каналы из встроенного
+                # списка читаются при любом выборе (из текста постов разбираются выбранные виды).
+                sources=[x for x in STATIC_SOURCES if ('mtproto' in types or x[1].startswith('tgchannel://'))]
                 self.q.put(('status',f'Использую {len(sources)} встроенных источников…'))
                 log(f'STATIC sources count={len(sources)}')
-            if include_other:
-                sources=sources+OTHER_PROXY_SOURCES
-                log(f'OTHER-TYPES sources added={len(OTHER_PROXY_SOURCES)} (socks5/http/web)')
+            extra_typed=typed_sources_for(types)
+            if extra_typed:
+                sources=sources+extra_typed
+                log(f'TYPED sources added={len(extra_typed)} types={",".join(types)}')
+            if 'web' in types and not self.scan_dynamic_sources and not enhanced:
+                self.q.put(('status','WEB-прокси: готовых публичных списков нет — ищу ссылки tg://webproxy в тг-каналах и найденных источниках (удобнее с динамическим/улучшенным поиском).'))
             if self.stop_event.is_set():
                 log('SCAN stopped before source loading'); return
 
@@ -2459,9 +3072,10 @@ class App:
                 with ThreadPoolExecutor(max_workers=source_workers) as ex:
                     fs={}
                     for name,url in src_list:
-                        ptype=OTHER_SOURCE_TYPES.get(url)  # 'socks5'/'http'/'web' для типизированных источников, иначе None
+                        ptype=OTHER_SOURCE_TYPES.get(url) or _SOURCE_TYPE_HINTS.get(url)  # 'socks5'/'http' для «голых» списков одного вида, иначе None
+                        if ptype and ptype not in types: continue  # вид не выбран пользователем
                         if url.startswith('tgchannel://'):
-                            fs[ex.submit(_load_channel_source,url,include_other)]=(url,name,None)
+                            fs[ex.submit(_load_channel_source,url,include_other,telegram_proxy)]=(url,name,None)
                         elif ptype:
                             fs[ex.submit(http_get,url,8)]=(url,name,ptype)
                         else:
@@ -2473,7 +3087,7 @@ class App:
                             log('SCAN stop during source loading'); break
                         try:
                             text=f.result()
-                            ps=parse_typed_links(text,ptype) if ptype else parse_proxies(text,include_other=include_other)
+                            ps=parse_typed_links(text,ptype) if ptype else parse_proxies(text,types=types)
                             for p in ps:
                                 p['source']=name
                                 candidates[_pkey(p)]=p
@@ -2519,7 +3133,7 @@ class App:
                 # proxy is only ever shown to the user (accept()) if it passes, which is
                 # what satisfies "проверка перед тем как отдать пользователю в список".
                 if target_reached.is_set() or self.stop_event.is_set(): return
-                passed,detail=stability_test(p,stability_seconds,self.stop_event,target_reached)
+                passed,detail=stability_test(p,stability_seconds,self.stop_event,target_reached,max_ping=max_ping)
                 if passed:
                     p['stability']='Онлайн - Проверен'
                     accept(p)
@@ -2564,7 +3178,11 @@ class App:
                 finally:
                     if phase2_ex: phase2_ex.shutdown(wait=True,cancel_futures=True)
 
-            proxies=list(candidates.values()); self.q.put(('progress_check_start',len(proxies)))
+            # Порядок проверки: сначала виды с высокой долей рабочих (MTProto, WEB), затем
+            # SOCKS5/HTTP из больших универсальных списков — иначе тысячи «голых» адресов
+            # заняли бы все потоки раньше, чем дойдёт очередь до MTProto.
+            _rank={t:i for i,t in enumerate(('mtproto','web','socks5','http'))}
+            proxies=sorted(candidates.values(),key=lambda p:_rank.get(p.get('ptype','mtproto'),9)); self.q.put(('progress_check_start',len(proxies)))
             already_checked_keys.update(candidates.keys())
             run_check_round(proxies)
 
@@ -2595,7 +3213,7 @@ class App:
                 self.q.put(('status',f'Прокси набралось меньше, чем нужно ({len(found)}/{target}) — доп. поиск источников, раунд {topup_round}/{max_topup_rounds}…'))
                 log(f'TOPUP round={topup_round} found={len(found)}/{target} budget={remaining_budget:.1f}s')
                 more=discover_sources(self.stop_event,lambda s:self.q.put(('status',s)),target=dynamic_target,
-                                       enhanced=enhanced,exclude=used_source_urls,time_budget=remaining_budget)
+                                       enhanced=enhanced,exclude=used_source_urls,time_budget=remaining_budget,github_token=github_token,telegram_proxy=telegram_proxy,types=types)
                 if not more or self.stop_event.is_set():
                     log(f'TOPUP round={topup_round} no new sources found — остановка дозапроса'); break
                 used_source_urls.update(url for url,_ in more)
@@ -2603,7 +3221,7 @@ class App:
                 log(f'TOPUP round={topup_round} new_sources={len(more)} new_candidates={added} total_candidates={len(candidates)}')
                 if added<=0:
                     log(f'TOPUP round={topup_round} новые источники не дали новых кандидатов — остановка дозапроса'); break
-                new_proxies=[p for k,p in candidates.items() if k not in already_checked_keys]
+                new_proxies=sorted([p for k,p in candidates.items() if k not in already_checked_keys],key=lambda p:_rank.get(p.get('ptype','mtproto'),9))
                 already_checked_keys.update(k for k,_ in candidates.items())
                 self.q.put(('progress_extend',checked+len(new_proxies)))
                 run_check_round(new_proxies)
