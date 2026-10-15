@@ -100,7 +100,6 @@ lfs.github.com
 - `build_windows.bat`
 - `InterUI-Regular.ttf`
 - `InterUI-SemiBold.ttf`
-- `README.md` (необязательно)
 
 🎨 Два файла шрифта `InterUI-*.ttf` отвечают за современный внешний вид интерфейса. Без них программа также запустится и будет работать, но вместо них будет использоваться стандартный шрифт Windows - Segoe UI.
 
