@@ -35,7 +35,7 @@
 
 Этот шаг предназначен для пользователей из России, у которых GitHub открывается медленно, работает нестабильно или не позволяет скачивать файлы.
 
-Можно попробовать настроить [**zapret-discord-youtube от Flowseal**](https://github.com/Flowseal/zapret-discord-youtube/releases), добавив необходимые домены GitHub в используемый список правил.
+Можно попробовать настроить [**zapret-discord-youtube от Flowseal**](https://github.com/Flowseal/zapret-discord-youtube/releases), добавив необходимые домены GitHub в list-general-user.
 
 **🌐 Домены GitHub для добавления:**
 
