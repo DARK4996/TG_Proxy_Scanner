@@ -69,6 +69,15 @@ if errorlevel 1 (
     echo   cryptography уже установлен - пропускаю.
 )
 
+%PY% -c "import telethon" >nul 2>nul
+if errorlevel 1 (
+    echo   telethon не найден - устанавливаю ^(чтение тг-каналов через MTProto^)...
+    %PY% -m pip install telethon
+    if errorlevel 1 goto :pip_error
+) else (
+    echo   telethon уже установлен - пропускаю.
+)
+
 %PY% -c "import PIL" >nul 2>nul
 if errorlevel 1 (
     echo   Pillow не найден - устанавливаю ^(нужен для значков на кнопках^)...
@@ -80,14 +89,14 @@ if errorlevel 1 (
 
 echo.
 echo Сборка TelegramProxyScanner.exe ...
-%PY% -m PyInstaller --noconfirm --onefile --windowed --name TelegramProxyScanner TelegramProxyScanner.pyw
+%PY% -m PyInstaller --noconfirm --onefile --windowed --collect-submodules telethon --hidden-import pyaes --hidden-import rsa --name TelegramProxyScanner TelegramProxyScanner.pyw
 if errorlevel 1 goto :build_error
 
 copy /Y dist\TelegramProxyScanner.exe . >nul
 echo.
 echo Готово: TelegramProxyScanner.exe
-echo Пакеты cryptography и Pillow вшиты прямо в .exe (быстрая проверка прокси
-echo и значки на кнопках) - отдельно их устанавливать не нужно.
+echo Пакеты cryptography, Pillow и telethon вшиты прямо в .exe (быстрая проверка
+echo прокси, значки на кнопках, чтение тг-каналов) - отдельно их устанавливать не нужно.
 pause
 exit /b 0
 
