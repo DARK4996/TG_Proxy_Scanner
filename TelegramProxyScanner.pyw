@@ -1,6 +1,6 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import threading, queue, urllib.request, urllib.parse, json, re, socket, time, os, sys, subprocess, shutil, traceback, platform, random, struct, hashlib, hmac, collections, ctypes, math, base64, html, ssl
+from tkinter import ttk, messagebox, filedialog, simpledialog
+import threading, queue, urllib.request, urllib.parse, json, re, socket, time, os, sys, subprocess, shutil, traceback, platform, random, struct, hashlib, hmac, collections, ctypes, math, base64, html, ssl, webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -210,6 +210,7 @@ PTYPE_LABELS = {'mtproto':'MTProto','socks5':'SOCKS5','http':'HTTP','web':'WEB'}
 # даже при аномалии (например, сервер всегда отдаёт одни и те же id) не уйти в цикл.
 TELEGRAM_CHANNEL_MESSAGE_LIMIT = 50
 TELEGRAM_CHANNEL_MAX_PAGES = 6
+MAX_BARE_CANDIDATES = 8000   # v33: потолок кандидатов SOCKS5/HTTP на вид (см. scan)
 
 # Filenames real MTProto-list repositories commonly use for their published list.
 # Tried directly against raw.githubusercontent.com first during dynamic discovery,
@@ -250,7 +251,16 @@ DISCOVERY_QUERIES_BY_TYPE = {
     'mtproto': DISCOVERY_QUERIES,
     'socks5': ['topic:socks5-proxy', 'topic:socks5', 'socks5 proxy list', 'free socks5 proxy list telegram'],
     'http': ['topic:http-proxy', 'topic:proxy-list', 'http proxy list', 'free http proxy list'],
-    'web': ['telegram webproxy', 'tg://webproxy list'],
+    'web': ['telegram webproxy', 'tg://webproxy list', 'tg-webproxy', 'tproxy-server telegram', 'telegram web proxy list',
+            'webproxy telegram desktop proxy list', 'topic:telegram-webproxy', 'topic:tproxy', 'WebMTProxy', 't.me/webproxy server secret'],
+}
+# v33: запросы улучшенного поиска (DuckDuckGo) по видам — раньше для SOCKS5/HTTP/WEB использовались
+# только MTProto-запросы, поэтому страницы со списками WEB/SOCKS5/HTTP почти не находились.
+ENHANCED_SEARCH_QUERIES_BY_TYPE = {
+    'socks5': ['free socks5 proxy list telegram', 'socks5 прокси список для телеграм', 'tg://socks?server= list'],
+    'http': ['free http proxy list telegram', 'http прокси список для телеграм'],
+    'web': ['"t.me/webproxy?server=" secret', '"tg://webproxy?server="', 'telegram webproxy список прокси канал',
+            'telegram web proxy server secret list'],
 }
 COMMON_FILENAMES_BY_TYPE = {
     'mtproto': COMMON_PROXY_FILENAMES,
@@ -260,7 +270,9 @@ COMMON_FILENAMES_BY_TYPE = {
     'http': ['http.txt','HTTP.txt','https.txt','http_proxies.txt','http-proxies.txt','proxies/http.txt',
              'proxies-http.txt','http/data.txt','proxies/protocols/http/data.txt','proxy.txt','proxies.txt',
              'all.txt','list.txt','README.md'],
-    'web': ['webproxy.txt','web.txt','web_proxies.txt','proxies.txt','proxy.txt','all_proxies.txt','README.md'],
+    'web': ['webproxy.txt','web.txt','web_proxies.txt','webproxies.txt','web_proxy.txt','webproxy.md','proxies.txt','proxy.txt',
+            'all_proxies.txt','links.txt','servers.txt','list.txt','proxies.md','data/webproxy.txt','subscription.txt',
+            'README.md','README_RU.md','README.ru.md'],
 }
 
 # Содержимое найденного кандидата проверяется ПО ВИДУ (никогда по одному имени файла):
@@ -276,7 +288,8 @@ def sample_matches_type(sample, ptype):
         if ptype == 'socks5' and len(TG_SOCKS_RE.findall(sample)) >= 2: return True
         return len(_IPPORT_LINE_RE.findall(sample)) >= 10
     if ptype == 'web':
-        return len(TG_WEBPROXY_RE.findall(sample)) >= 1
+        # v33: считаем только НАСТОЯЩИЕ ссылки (не примеры из README с example.com/«…»).
+        return any(parse_webproxy_link(m.rstrip('.,);')) for m in TG_WEBPROXY_RE.findall(sample))
     return False
 
 def _guess_list_type(url):
@@ -295,7 +308,7 @@ def _guess_list_type(url):
 # него enhanced-режим запускает ещё и текстовый веб-поиск (см. ENHANCED_SEARCH_QUERIES),
 # чтобы находить и другие подобные каналы/сайты/форумы, а не только эти константы.
 ENHANCED_SEED_CHANNELS = [
-    'MTProxy4free', 'mtprx', 'MTProxyLists', 'MTProtoProxies', 'proxy_mtproto', 'mtprotoproxy_fast',
+    'MTProxy4free', 'mtprx', 'MTProtoProxies', 'proxy_mtproto', 'mtprotoproxy_fast',
     'urlsources',  # добавлен по просьбе пользователя (пример: t.me/urlsources/43266)
     'gidroski',    # добавлен по просьбе пользователя — активно публикует рабочие mtproto-прокси
 ]
@@ -756,6 +769,23 @@ def parse_socks_tg_link(link):
     except Exception:
         return None
 
+_PLACEHOLDER_HOST_RE = re.compile(r'(?:^|\.)(?:example\.(?:com|org|net)|localhost|invalid|test)$|(?:^|[.\-_])your[-_]?(?:domain|server|host|proxy|site)|^(?:domain|host(?:name)?|server)(?:\.|$)|^x+\.|<|>|\{|\}|\[|\]|…|\.\.\.', re.I)
+_PLACEHOLDER_SECRET_RE = re.compile(r'…|\.\.\.|<|>|\{|\}|x{4,}|^your|secret$|^[0-9a-f]?0{8,}|^(?:dd|ee)?(?:0123456789abcdef)+', re.I)
+
+def is_placeholder_proxy(server, secret=''):
+    """v33: README-инструкции (tg-webproxy, WebMTProxy…) содержат ПРИМЕРЫ ссылок вида
+    https://t.me/webproxy?server=proxy.example.com&secret=dd7f3c1e… — раньше они попадали в
+    список как «найденные WEB-прокси» (в логе пользователя: 7 «источников», 2–3 «прокси»,
+    ни один не рабочий). Распознаём заглушки: example.com/your-domain/HOST, многоточие,
+    угловые/фигурные скобки, «секрет» из X/нулей, а также секрет не из hex/base64-символов."""
+    server=(server or '').strip().lower()
+    if not server or '.' not in server or _PLACEHOLDER_HOST_RE.search(server): return True
+    secret=(secret or '').strip()
+    if secret:
+        if _PLACEHOLDER_SECRET_RE.search(secret): return True
+        if not re.fullmatch(r'[0-9a-fA-F]{16,}|[A-Za-z0-9_\-+/=]{16,}', secret): return True
+    return False
+
 def parse_webproxy_link(link):
     """tg://webproxy?server=...&secret=... (или https://t.me/webproxy?...) — реальная
     ссылка подключения WEB-прокси, найденная пользователем и подтверждённая при
@@ -765,7 +795,7 @@ def parse_webproxy_link(link):
     try:
         u=urllib.parse.urlparse(link.strip()); q=urllib.parse.parse_qs(u.query)
         server=q.get('server',[None])[0]; secret=q.get('secret',[None])[0]
-        if server and secret:
+        if server and secret and not is_placeholder_proxy(server,secret):
             return {'server':server,'port':443,'secret':secret,'ptype':'web',
                      'link':f"tg://webproxy?server={urllib.parse.quote(server)}&secret={urllib.parse.quote(secret)}"}
     except Exception:
@@ -881,6 +911,17 @@ def parse_single_proxy_input(text):
     return None
 
 
+_PROBE_ERR = threading.local()  # причина последней неудачи fast_probe_get в этом потоке (для диагностики)
+
+def _short_err(e):
+    if isinstance(e, urllib.error.HTTPError): return f'HTTP {e.code}'
+    if isinstance(e, (socket.timeout, TimeoutError)) or 'timed out' in str(e).lower(): return 'таймаут'
+    if isinstance(e, urllib.error.URLError):
+        r = getattr(e, 'reason', None)
+        if isinstance(r, (socket.timeout, TimeoutError)) or 'timed out' in str(r).lower(): return 'таймаут'
+        return f'сеть: {str(r)[:60]}'
+    return f'{type(e).__name__}: {str(e)[:60]}'
+
 def fast_probe_get(url, timeout=4.0, max_bytes=262144, headers=None):
     """Single-attempt, no-retry, no-subprocess-fallback fetch used ONLY to probe
     discovery candidates, most of which are expected to 404/fail (that's normal: we're
@@ -906,8 +947,10 @@ def fast_probe_get(url, timeout=4.0, max_bytes=262144, headers=None):
         })
         with urllib.request.urlopen(req,timeout=timeout) as r:
             data=r.read(max_bytes)
+            _PROBE_ERR.msg=None if data else 'пустой ответ'
             return data.decode('utf-8','replace') if data else None
-    except Exception:
+    except Exception as e:
+        _PROBE_ERR.msg=_short_err(e)
         return None
 
 
@@ -995,6 +1038,7 @@ TG_GATEWAYS = [
 TG_PROBE_CHANNEL = 'telegram'   # официальный канал Telegram — гарантированно существует и публичен
 _TG_ACCESS = {'proxy': None, 'gateway': None, 'use_gateways': True}
 _TME_PROBE_CACHE = {'ok': None, 'ts': 0.0, 'route': None, 'trace': ''}
+_TME_PROBE_LOCK = threading.Lock()   # v33: одновременные потоки не запускают проверку маршрутов по 8 раз (в логе было 8 одинаковых TME PROBE FAIL подряд)
 
 def reset_tme_probe_cache():
     _TME_PROBE_CACHE['ok'] = None; _TME_PROBE_CACHE['ts'] = 0.0
@@ -1054,10 +1098,14 @@ def _route_get(route, channel, before, timeout):
         return http_get(url, timeout, extra_headers=route['headers'])
     return http_get(url, timeout)
 
+_ROUTE_REASONS = {}  # имя маршрута -> почему не сработал (для лога; заполняется _route_probe_one)
+
 def _route_probe_one(route, timeout):
     """Быстрая однопопыточная проверка маршрута на канале TG_PROBE_CHANNEL; True только
-    если вернулись настоящие посты. Никогда не бросает исключений."""
+    если вернулись настоящие посты. Никогда не бросает исключений. Причина неудачи
+    (таймаут / HTTP-код / «ответ не похож на канал») записывается в _ROUTE_REASONS."""
     try:
+        _PROBE_ERR.msg=None
         url = _route_url(route, TG_PROBE_CHANNEL, None)
         if route['kind'] == 'direct' and route.get('proxy') and _build_curl_proxy_arg(route['proxy']):
             text = http_get_via_proxy(url, timeout, route['proxy'])
@@ -1065,8 +1113,13 @@ def _route_probe_one(route, timeout):
             text = fast_probe_get(url, timeout, max_bytes=300000, headers=route['headers'])
         else:
             text = fast_probe_get(url, timeout, max_bytes=300000)
-        return _looks_like_channel_page(text, TG_PROBE_CHANNEL)
-    except Exception:
+        ok = _looks_like_channel_page(text, TG_PROBE_CHANNEL)
+        if ok: _ROUTE_REASONS.pop(route['name'], None)
+        elif text: _ROUTE_REASONS[route['name']] = f'ответ не похож на канал ({len(text)} байт)'
+        else: _ROUTE_REASONS[route['name']] = getattr(_PROBE_ERR, 'msg', None) or 'нет ответа'
+        return ok
+    except Exception as e:
+        _ROUTE_REASONS[route['name']] = _short_err(e)
         return False
 
 def probe_tg_routes(routes, timeout=3.0, gateway_timeout=6.0):
@@ -1082,7 +1135,7 @@ def probe_tg_routes(routes, timeout=3.0, gateway_timeout=6.0):
         for r, f in zip(routes, futs):
             try: ok = bool(f.result(timeout=max(0.1, deadline - time.time())))
             except Exception: ok = False
-            trace.append(f"{r['name']}={'ok' if ok else 'нет'}")
+            trace.append(f"{r['name']}=ok" if ok else f"{r['name']}=нет ({_ROUTE_REASONS.get(r['name'], 'не успел ответить')})")
             if ok: return r, trace
         return None, trace
     finally:
@@ -1096,11 +1149,14 @@ def tme_reachable(timeout=3.0, proxy=None):
     now = time.time()
     if _TME_PROBE_CACHE['ok'] is not None and (now - _TME_PROBE_CACHE['ts']) < TME_PROBE_TTL:
         return _TME_PROBE_CACHE['ok']
-    px = proxy if proxy is not None else _TG_ACCESS['proxy']
-    routes = build_tg_routes(px, _TG_ACCESS['gateway'], _TG_ACCESS['use_gateways'])
-    route, trace = probe_tg_routes(routes, timeout)
-    ok = route is not None
-    _TME_PROBE_CACHE.update(ok=ok, ts=now, route=route, trace=', '.join(trace))
+    with _TME_PROBE_LOCK:
+        if _TME_PROBE_CACHE['ok'] is not None and (time.time() - _TME_PROBE_CACHE['ts']) < TME_PROBE_TTL:
+            return _TME_PROBE_CACHE['ok']      # пока ждали замок, другой поток уже всё проверил
+        px = proxy if proxy is not None else _TG_ACCESS['proxy']
+        routes = build_tg_routes(px, _TG_ACCESS['gateway'], _TG_ACCESS['use_gateways'])
+        route, trace = probe_tg_routes(routes, timeout)
+        ok = route is not None
+        _TME_PROBE_CACHE.update(ok=ok, ts=time.time(), route=route, trace=', '.join(trace))
     if ok:
         log(f"TME PROBE OK: чтение тг-каналов через «{route['name']}» (проверено: {', '.join(trace)})")
     else:
@@ -1298,7 +1354,50 @@ def _ddg_search_urls(query, max_results=6, timeout=4.0):
         return []
 
 
-def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=frozenset(), time_budget=None, github_token=None, telegram_proxy=None, types=None):
+DISCOVERY_CACHE_FILE = os.path.join(os.path.dirname(LOG_FILE), 'TelegramProxyScanner_sources_cache.json')
+DISCOVERY_CACHE_TTL = 6 * 3600   # адреса найденных списков живут долго (сами списки скачиваются заново при каждом скане)
+
+
+def _discovery_cache_key(types, enhanced):
+    return ','.join(normalize_types(types)) + ('|enhanced' if enhanced else '|plain')
+
+
+def load_discovery_cache(types, enhanced, path=None, now=None):
+    """[(url, название)] источников, найденных предыдущим поиском (не старше DISCOVERY_CACHE_TTL),
+    либо None. Поиск источников — самая долгая часть скана (до 90 с ожидания лимита GitHub API),
+    а адреса списков меняются редко, так что повторные сканы начинаются сразу."""
+    try:
+        with open(path or DISCOVERY_CACHE_FILE, 'r', encoding='utf-8') as f: data = json.load(f)
+        e = data.get(_discovery_cache_key(types, enhanced))
+        now = time.time() if now is None else now
+        if not e or now - float(e.get('time', 0)) > DISCOVERY_CACHE_TTL or len(e.get('sources', [])) < 3: return None
+        out = []
+        for url, label, hint in e['sources']:
+            if hint: _SOURCE_TYPE_HINTS[url] = hint
+            out.append((url, label))
+        return out, now - float(e['time'])
+    except Exception:
+        return None
+
+
+def save_discovery_cache(types, enhanced, sources, path=None):
+    """Запоминает найденные источники (url, название); объединяет с уже сохранёнными для этого набора видов."""
+    try:
+        p = path or DISCOVERY_CACHE_FILE
+        try:
+            with open(p, 'r', encoding='utf-8') as f: data = json.load(f)
+        except Exception: data = {}
+        key = _discovery_cache_key(types, enhanced)
+        old = data.get(key, {}).get('sources', []) if time.time() - float(data.get(key, {}).get('time', 0)) <= DISCOVERY_CACHE_TTL else []
+        merged = {u: [u, l, h] for u, l, h in old}
+        for url, label in sources: merged[url] = [url, label, _SOURCE_TYPE_HINTS.get(url)]
+        data[key] = {'time': time.time(), 'sources': list(merged.values())}
+        with open(p, 'w', encoding='utf-8') as f: json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        log(f'DISCOVERY cache save failed: {e}', True)
+
+
+def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=frozenset(), time_budget=None, github_token=None, telegram_proxy=None, types=None, early_stop=None):
     """Discover public sources that publish MTProto proxy lists, at runtime.
 
     Normal mode (enhanced=False) searches GitHub only: several precise `topic:` and
@@ -1458,7 +1557,9 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
                         candidates.append((site, site, None))
                     if time_left()>6:
                         found_urls=[]
-                        for urls in probe_pool.map(lambda q:_ddg_search_urls(q,6,min(4.0,time_left())), ENHANCED_SEARCH_QUERIES):
+                        eq=list(ENHANCED_SEARCH_QUERIES) if 'mtproto' in types else []
+                        for t in types: eq.extend(ENHANCED_SEARCH_QUERIES_BY_TYPE.get(t,[]))
+                        for urls in probe_pool.map(lambda q:_ddg_search_urls(q,6,min(4.0,time_left())), eq):
                             found_urls.extend(urls)
                         for u in dict.fromkeys(found_urls):
                             nu=_normalize_discovered_url(u)
@@ -1484,6 +1585,12 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
                 pass  # дедлайн по as_completed() истёк — используем то, что успели найти
 
             if stop_event.is_set() or len(sources)>=target: break
+            if early_stop and len(sources)>=early_stop and pending_queries:
+                # v33: источников уже достаточно, чтобы начать проверку — не ждём сброса лимита GitHub API
+                # ради остальных запросов (в логе на это уходило до 80 с из ~125 с скана); если прокси не
+                # хватит, дозапрос продолжит поиск.
+                log(f'DISCOVERY ранняя остановка: найдено {len(sources)} источников (≥{early_stop}), невыполненных запросов: {len(pending_queries)} — продолжит дозапрос при необходимости')
+                break
             if time_left()<=5 or attempt>=MAX_DISCOVERY_INTERNAL_RETRIES: break
             if not pending_queries:
                 # Все запросы GitHub выполнены успешно, seed/веб-поиск тоже один раз —
@@ -1506,6 +1613,592 @@ def discover_sources(stop_event, status_cb, target=40, enhanced=False, exclude=f
     if len(sources)<target:
         status_cb(f'Поиск источников завершён за {elapsed:.0f} с — найдено {len(sources)} из {target}.')
     return sources
+
+
+# =====================================================================================
+# v33 (пункт №5 обращения): серьёзное чтение Telegram-каналов ЧЕРЕЗ MTProto.
+#
+# Проблема: SOCKS5/HTTP-прокси почти не найти, а чтение t.me/s/<канал> по HTTPS через
+# MTProto-прокси технически невозможно (MTProto-прокси пересылает только протокол
+# Telegram). Но сам клиент Telegram умеет читать каналы именно по MTProto — через те же
+# MTProto-прокси. Поэтому здесь используется настоящий клиент протокола (библиотека
+# Telethon, MIT) с входом под ВАШИМ аккаунтом и вашими api_id/api_hash (my.telegram.org):
+# анонимно читать историю канала по MTProto нельзя (сервер отвечает AUTH_KEY_UNREGISTERED).
+#
+# Транспорт: Telethon сам умеет только «простые» и dd-секреты и не умеет FakeTLS (ee) —
+# а большинство современных прокси именно такие. Поэтому между Telethon и прокси стоит
+# локальный МОСТ (MTProxyBridge): Telethon подключается к 127.0.0.1 с заведомо известным
+# секретом, мост расшифровывает его обфускацию и заново открывает соединение с реальным
+# прокси ТЕМ ЖЕ проверенным кодом, что и проверка прокси (включая FakeTLS-рукопожатие),
+# после чего перекачивает поток, перешифровывая его туда и обратно.
+# =====================================================================================
+TG_SESSION_FILE = os.path.join(os.path.dirname(LOG_FILE), 'TelegramProxyScanner_tg')  # Telethon сам добавит ".session"
+TG_IMPORT_FILE = os.path.join(os.path.dirname(LOG_FILE), 'TelegramProxyScanner_imported.txt')
+TG_READER_MESSAGES = 50          # сколько последних сообщений канала читать
+TG_READER_MAX_DOCS = 4           # сколько вложенных .txt/.json-файлов на канал скачивать
+TG_READER_MAX_DOC_BYTES = 3_000_000
+
+
+def telethon_available():
+    """Установлен ли Telethon (его ставит build_windows.bat; без него остальное работает)."""
+    try:
+        import telethon  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _recv_some(s, n=65536):
+    f = getattr(s, 'recv_some', None)
+    return f(n) if f else s.recv(n)
+
+
+class MTProxyBridge:
+    """Локальный перешифровывающий мост 127.0.0.1 -> MTProto-прокси (см. комментарий выше).
+    Клиент (Telethon) подключается как к обычному MTProxy с секретом DUMMY_SECRET."""
+    DUMMY_SECRET = bytes.fromhex('5a1c0de7b3f94a62d8e01f7c4b96a3d5')
+
+    def __init__(self):
+        self.srv = socket.socket()
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(('127.0.0.1', 0)); self.srv.listen(16)
+        self.port = self.srv.getsockname()[1]
+        self.upstream = None
+        self._lock = threading.Lock(); self._conns = set(); self._closed = False
+        self.stats = {'accepted': 0, 'upstream_ok': 0, 'upstream_fail': 0, 'last_error': ''}
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    @property
+    def secret_hex(self): return self.DUMMY_SECRET.hex()
+
+    def set_upstream(self, p):
+        self.upstream = p
+        self.stats.update(accepted=0, upstream_ok=0, upstream_fail=0, last_error='')
+        self._drop_all()
+
+    def _drop_all(self):
+        with self._lock:
+            conns = list(self._conns); self._conns.clear()
+        for c in conns:
+            try: c.close()
+            except Exception: pass
+
+    def close(self):
+        self._closed = True
+        try: self.srv.close()
+        except Exception: pass
+        self._drop_all()
+
+    def _loop(self):
+        while not self._closed:
+            try: c, _ = self.srv.accept()
+            except Exception: return
+            threading.Thread(target=self._handle, args=(c,), daemon=True).start()
+
+    def _handle(self, c):
+        up = None
+        try:
+            self.stats['accepted'] += 1
+            c.settimeout(10)
+            h = _read_exact(c, 64)
+            key = hashlib.sha256(h[8:40] + self.DUMMY_SECRET).digest()
+            cdec = _AESCTRState(key, h[40:56])          # клиент -> мост (поток продолжается после 64 байт заголовка)
+            plain = cdec.crypt(h)
+            tag = plain[56:60]; dc_id = struct.unpack('<h', plain[60:62])[0]
+            if tag not in (b'\xee\xee\xee\xee', b'\xdd\xdd\xdd\xdd'):
+                raise RuntimeError('мост: неподдерживаемый формат пакетов клиента')
+            rev = bytes(h[55:7:-1])
+            cenc = _AESCTRState(hashlib.sha256(rev[:32] + self.DUMMY_SECRET).digest(), rev[32:48])  # мост -> клиент
+            p = self.upstream
+            if not p: raise RuntimeError('мост: не задан прокси')
+            up, uenc, udec, _ = _mtproxy_session_open(p, timeout=7.0, dc_id=dc_id,
+                                                      tag_mode='dd' if tag == b'\xdd\xdd\xdd\xdd' else 'standard')
+            self.stats['upstream_ok'] += 1
+            c.settimeout(None); up.settimeout(None)
+            for z in (c, getattr(up, 'sock', up)):      # keepalive/NODELAY: простой в ожидании кода входа не должен рвать соединение
+                try:
+                    z.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    z.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except Exception: pass
+            with self._lock: self._conns.update((c, up))
+            where = f'{p["server"]}:{p["port"]}'
+            info = {'c2u': 0, 'u2c': 0, 'end': ''}
+            t0 = time.time()
+
+            def shut():
+                for z in (c, up):
+                    try: getattr(z, 'sock', z).shutdown(socket.SHUT_RDWR)   # FIN вместо RST: Telethon увидит обычное закрытие
+                    except Exception: pass
+                    try: z.close()
+                    except Exception: pass
+
+            def c2u():
+                try:
+                    while True:
+                        d = c.recv(65536)
+                        if not d:
+                            info['end'] = info['end'] or 'клиент (Telethon) закрыл соединение'; break
+                        up.sendall(uenc.crypt(cdec.crypt(d))); info['c2u'] += len(d)
+                except Exception as e:
+                    info['end'] = info['end'] or f'ошибка записи в прокси/чтения клиента: {type(e).__name__}: {str(e)[:80]}'
+                finally: shut()
+            threading.Thread(target=c2u, daemon=True).start()
+            try:
+                while True:
+                    d = _recv_some(up, 65536)
+                    if not d:
+                        info['end'] = info['end'] or 'прокси закрыл соединение'; break
+                    c.sendall(cenc.crypt(udec.crypt(d))); info['u2c'] += len(d)
+            except Exception as e:
+                info['end'] = info['end'] or f'прокси оборвал соединение: {type(e).__name__}: {str(e)[:80]}'
+            finally:
+                shut()
+                log(f'BRIDGE закрыто via {where} dc={dc_id} длилось={time.time()-t0:.1f}с клиент->прокси={info["c2u"]}Б прокси->клиент={info["u2c"]}Б причина: {info["end"]}')
+        except Exception as e:
+            self.stats['upstream_fail'] += 1; self.stats['last_error'] = f'{type(e).__name__}: {e}'
+            log(f'BRIDGE ошибка: {self.stats["last_error"][:160]}')
+            for z in (c, up):
+                try:
+                    if z: z.close()
+                except Exception: pass
+
+
+def reader_candidate_proxies(proxies, limit=60):
+    """MTProto-прокси, пригодные для Telethon-моста: любые виды секрета (мост умеет и
+    FakeTLS), отсортированные по ping."""
+    ok = [p for p in proxies if p.get('ptype', 'mtproto') == 'mtproto' and p.get('secret') and p.get('ok', True)]
+    ok.sort(key=lambda p: (p.get('ping') is None, p.get('ping') or 0))
+    return ok[:limit]
+
+
+def pick_working_mtproto(candidates, stop_event, want=8, time_budget=45.0, workers=48, timeout=3.0):
+    """Быстро отбирает до `want` реально рабочих MTProto (настоящее рукопожатие, не только
+    TCP) из случайной выборки кандидатов — они нужны ЧИТАТЕЛЮ каналов до основной проверки."""
+    pool = [p for p in candidates if p.get('ptype', 'mtproto') == 'mtproto' and p.get('secret')]
+    random.shuffle(pool)
+    pool = pool[:600]
+    good = []; deadline = time.time() + time_budget
+    if not pool: return good
+    ex = ThreadPoolExecutor(max_workers=min(workers, len(pool)))
+    try:
+        futs = {ex.submit(check_proxy_online, p, timeout): p for p in pool}
+        try:
+            for f in as_completed(futs, timeout=max(1.0, time_budget)):
+                if stop_event.is_set() or time.time() > deadline: break
+                p = futs[f]
+                try: ok, ms, ip, err, method = f.result()
+                except Exception: continue
+                if ok and method not in ('tcp', 'tcp-only'):
+                    q = dict(p); q.update(ok=True, ping=ms, ip=ip, check_method=method); good.append(q)
+                    if len(good) >= want: break
+        except Exception:
+            pass
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    good.sort(key=lambda p: p.get('ping') or 0)
+    return good
+
+
+class TgReader:
+    """Клиент Telegram (Telethon) в фоновом asyncio-потоке с синхронным интерфейсом.
+    api_hash и коды входа НИКОГДА не пишутся в лог; сессия хранится локально в файле
+    TG_SESSION_FILE.session (удаляется кнопкой «Выйти»)."""
+
+    def __init__(self, api_id, api_hash, session_path=TG_SESSION_FILE, log_cb=None):
+        import asyncio
+        self.api_id = int(str(api_id).strip()); self.api_hash = str(api_hash).strip()
+        self.session_path = session_path; self.log = log_cb or (lambda m: None)
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True); self._thread.start()
+        self.bridge = MTProxyBridge(); self.client = None; self.proxy = None
+        self._phone = None; self._code_hash = None
+
+    def _run_loop(self):
+        import asyncio
+        asyncio.set_event_loop(self.loop); self.loop.run_forever()
+
+    def _call(self, coro, timeout):
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    def _new_client(self, p):
+        import warnings
+        warnings.filterwarnings('ignore', message='proxy argument will be ignored')  # для MTProxy-коннектора это не используется
+        from telethon import TelegramClient
+        from telethon.network.connection import tcpmtproxy as _m
+        if p is None:   # прямое подключение (если Telegram у вас доступен без прокси)
+            async def make_direct():
+                return TelegramClient(self.session_path, self.api_id, self.api_hash, connection_retries=3, retry_delay=2,
+                                      auto_reconnect=True, request_retries=3, timeout=15, lang_code='ru', system_lang_code='ru')
+            return self._call(make_direct(), 10)
+        codec = (_m.ConnectionTcpMTProxyIntermediate if classify_secret(p.get('secret', '')) == 'standard'
+                 else _m.ConnectionTcpMTProxyRandomizedIntermediate)
+        # Клиент создаётся и используется в потоке цикла (aiosqlite/loop-привязка Telethon).
+        async def make():
+            return TelegramClient(self.session_path, self.api_id, self.api_hash, connection=codec,
+                                  proxy=('127.0.0.1', self.bridge.port, self.bridge.secret_hex),
+                                  connection_retries=3, retry_delay=2, auto_reconnect=True,
+                                  request_retries=3, timeout=15, lang_code='ru', system_lang_code='ru')
+        return self._call(make(), 10)
+
+    def connect(self, proxies, stop_event=None, per_try=30.0, max_tries=10, status_cb=None):
+        """Подключается к Telegram через первый сработавший из `proxies`. Возвращает
+        использованный прокси либо бросает RuntimeError с понятной причиной."""
+        if self.client is not None:
+            try:
+                if self._call(self._is_connected(), 5): return self.proxy
+            except Exception: pass
+            self.disconnect()
+        last = ''; tries = 0
+        self._proxies = list(proxies)
+        for p in proxies:
+            if stop_event is not None and stop_event.is_set(): break
+            if tries >= max_tries: break
+            tries += 1
+            if status_cb: status_cb(f'Подключение к Telegram {tries}/{min(max_tries, len(proxies))}: '+('напрямую…' if p is None else f'через MTProto-прокси {p["server"]}:{p["port"]}…'))
+            if p is not None: self.bridge.set_upstream(p)
+            try:
+                client = self._new_client(p)
+                self._call(client.connect(), per_try)
+                if not self._call(self._is_connected_client(client), 5):
+                    raise ConnectionError('нет соединения')
+                self.client = client; self.proxy = p
+                self.log('TGREADER connected '+('directly' if p is None else f'via {p["server"]}:{p["port"]} ({classify_secret(p.get("secret",""))})'))
+                return p
+            except Exception as e:
+                last = f'{type(e).__name__}: {str(e)[:120]}'
+                bl = self.bridge.stats
+                self.log('TGREADER connect FAIL via '+('direct' if p is None else f'{p["server"]}:{p["port"]}')+f': {last} (bridge: {bl})')
+                try:
+                    self._call(self._safe_disconnect(client), 8)
+                except Exception: pass
+        raise RuntimeError('не удалось подключиться к Telegram ни через один из проверенных MTProto-прокси'
+                           + (f' (последняя ошибка: {last})' if last else ''))
+
+    def _reconnect(self):
+        """Заново подключается (сессия и авторизация на диске сохраняются), сначала через тот же прокси."""
+        first = [self.proxy] if getattr(self, 'proxy', None) is not None else []
+        rest = [p for p in getattr(self, '_proxies', []) if p is not self.proxy]
+        self.disconnect()
+        return self.connect(first + rest, max_tries=max(3, len(first + rest)), per_try=30.0)
+
+    def _with_reconnect(self, make_coro, timeout, tries=3):
+        """Выполняет запрос; при обрыве соединения (прокси закрыл, сброс, таймаут) переподключается
+        и повторяет — так вход не срывается, если соединение оборвалось, пока вы вводили код."""
+        import concurrent.futures
+        last = None
+        for i in range(tries):
+            try:
+                return self._call(make_coro(), timeout)
+            except (ConnectionError, OSError, TimeoutError, concurrent.futures.TimeoutError) as e:
+                last = e
+                self.log(f'TGREADER обрыв соединения ({type(e).__name__}: {str(e)[:100]}) — переподключаюсь, попытка {i+1}/{tries}')
+                if i == tries - 1: break
+                try: self._reconnect()
+                except Exception as e2:
+                    self.log(f'TGREADER переподключение не удалось: {str(e2)[:140]}'); last = e2; break
+        raise last
+
+    async def _is_connected(self):
+        return self.client is not None and self.client.is_connected()
+
+    async def _is_connected_client(self, c):
+        return c.is_connected()
+
+    async def _safe_disconnect(self, c):
+        try: await c.disconnect()
+        except Exception: pass
+
+    def disconnect(self):
+        c = self.client; self.client = None
+        if c is not None:
+            try: self._call(self._safe_disconnect(c), 8)
+            except Exception: pass
+
+    def close(self):
+        self.disconnect()
+        try: self.bridge.close()
+        except Exception: pass
+        try: self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception: pass
+
+    # ---- вход ----
+    def is_authorized(self, timeout=20):
+        async def f(): return await self.client.is_user_authorized()
+        ok = bool(self._with_reconnect(f, timeout))
+        set_tg_authorized(ok, self.session_path)
+        return ok
+
+    def send_code(self, phone, timeout=40):
+        async def f():
+            r = await self.client.send_code_request(phone)
+            return r.phone_code_hash
+        self._phone = phone.strip(); self._code_hash = self._with_reconnect(f, timeout)
+
+    def sign_in(self, code=None, password=None, timeout=30):
+        """Возвращает 'ok' либо 'password' (нужен облачный пароль 2FA)."""
+        from telethon.errors import SessionPasswordNeededError
+        async def f():
+            try:
+                if password is None:
+                    await self.client.sign_in(self._phone, code, phone_code_hash=self._code_hash)
+                else:
+                    await self.client.sign_in(password=password)
+                return 'ok'
+            except SessionPasswordNeededError:
+                return 'password'
+        res = self._with_reconnect(f, timeout)
+        if res == 'ok': set_tg_authorized(True, self.session_path)
+        return res
+
+    def me_label(self, timeout=15):
+        async def f():
+            me = await self.client.get_me()
+            if not me: return ''
+            name = ' '.join(x for x in (getattr(me, 'first_name', None), getattr(me, 'last_name', None)) if x)
+            return name or (getattr(me, 'username', '') or '')
+        try: return self._call(f(), timeout)
+        except Exception: return ''
+
+    def logout(self):
+        """Завершает сессию на сервере (если есть связь) и удаляет локальные файлы сессии."""
+        try:
+            if self.client is not None:
+                async def f(): await self.client.log_out()
+                self._call(f(), 15)
+        except Exception as e:
+            self.log(f'TGREADER logout: {type(e).__name__}: {str(e)[:100]}')
+        self.disconnect()
+        delete_tg_session_files(self.session_path)   # заодно удаляет отметку входа
+
+    # ---- чтение каналов ----
+    def fetch_channels(self, channels, limit=TG_READER_MESSAGES, stop_event=None, per_channel_timeout=60.0, status_cb=None):
+        """{канал: текст} — тексты последних сообщений + ссылки из текстовых ссылок/кнопок +
+        содержимое небольших .txt/.json-вложений. Ошибки по каналам — в {'канал': None}
+        (и в лог), чтобы вызывающий мог подключить запасной маршрут."""
+        out = {}
+        for i, ch in enumerate(channels):
+            if stop_event is not None and stop_event.is_set(): break
+            name = ch.strip().lstrip('@')
+            if status_cb: status_cb(f'Чтение канала {name} через MTProto ({i+1}/{len(channels)})…')
+            try:
+                out[ch] = self._with_reconnect(lambda: self._fetch_one(name, limit), per_channel_timeout, tries=2)
+                self.log(f'TGREADER channel={name} chars={len(out[ch])}')
+            except Exception as e:
+                out[ch] = None
+                self.log(f'TGREADER channel={name} FAIL {type(e).__name__}: {str(e)[:160]}')
+        return out
+
+    async def _fetch_one(self, name, limit):
+        import asyncio
+        from telethon import errors, types
+        c = self.client
+        try:
+            ent = await c.get_entity(name)
+            msgs = await c.get_messages(ent, limit=limit)
+        except errors.FloodWaitError as e:
+            if e.seconds <= 15:
+                await asyncio.sleep(e.seconds + 1)
+                ent = await c.get_entity(name); msgs = await c.get_messages(ent, limit=limit)
+            else:
+                raise
+        except (errors.UsernameInvalidError, errors.UsernameNotOccupiedError, errors.ChannelPrivateError, errors.ChannelInvalidError) as e:
+            # канала нет/он закрыт — это окончательный ответ Telegram, запасной маршрут через t.me не нужен
+            self.log(f'TGREADER channel={name}: недоступен ({type(e).__name__}) — пропускаю')
+            return ''
+        parts = []; docs = 0
+        for m in msgs or []:
+            if getattr(m, 'message', None): parts.append(m.message)
+            for e in (getattr(m, 'entities', None) or []):
+                if isinstance(e, types.MessageEntityTextUrl) and getattr(e, 'url', None): parts.append(e.url)
+            rm = getattr(m, 'reply_markup', None)
+            for row in (getattr(rm, 'rows', None) or []):
+                for b in (getattr(row, 'buttons', None) or []):
+                    u = getattr(b, 'url', None)
+                    if u: parts.append(u)
+            doc = getattr(m, 'document', None)
+            if doc is not None and docs < TG_READER_MAX_DOCS and 0 < (getattr(doc, 'size', 0) or 0) <= TG_READER_MAX_DOC_BYTES:
+                fname = ''
+                for a in (getattr(doc, 'attributes', None) or []):
+                    fname = getattr(a, 'file_name', None) or fname
+                if fname.lower().endswith(('.txt', '.json', '.csv', '.md', '.conf', '.list')):
+                    try:
+                        data = await c.download_media(m, file=bytes)
+                        if data: parts.append(data.decode('utf-8', 'replace')); docs += 1
+                    except Exception as e:
+                        self.log(f'TGREADER doc FAIL {name}/{fname}: {type(e).__name__}')
+        return '\n'.join(parts)
+
+
+def set_tg_authorized(ok, session_path=TG_SESSION_FILE):
+    """Отметка «вход реально выполнен» (файл .session создаётся уже при подключении, ещё до ввода кода,
+    поэтому по нему одному судить о входе нельзя — раньше из-за этого неудачный вход выглядел успешным)."""
+    mark = session_path + '.ok'
+    try:
+        if ok:
+            with open(mark, 'w', encoding='utf-8') as f: f.write('ok')
+        elif os.path.exists(mark): os.remove(mark)
+    except Exception as e:
+        log(f'TGREADER mark: {e}', True)
+
+
+def delete_tg_session_files(session_path=TG_SESSION_FILE):
+    for ext in ('.session', '.session-journal', '.ok'):
+        try: os.remove(session_path + ext)
+        except FileNotFoundError: pass
+        except Exception as e: log(f'TGREADER session delete {ext}: {e}', True)
+
+
+def tg_session_exists(session_path=TG_SESSION_FILE):
+    """Есть ли сессия, в которой вход был ДЕЙСТВИТЕЛЬНО завершён (файл сессии + отметка .ok)."""
+    return os.path.exists(session_path + '.session') and os.path.exists(session_path + '.ok')
+
+
+def extract_text_from_export(raw, filename=''):
+    """Текст для parse_proxies из файла экспорта Telegram Desktop (result.json / messages*.html)
+    либо обычного текстового файла. В экспорте ссылки лежат в href / поле "href" — их нужно
+    достать отдельно, иначе при чтении «видимого текста» теряются secret=… за скрытым текстом."""
+    if isinstance(raw, bytes):
+        text = None
+        for enc in ('utf-8-sig', 'utf-16', 'cp1251'):
+            try: text = raw.decode(enc); break
+            except Exception: continue
+        if text is None: text = raw.decode('utf-8', 'replace')
+    else:
+        text = raw
+    stripped = text.lstrip()
+    out = []
+    if stripped[:1] in '{[':
+        try:
+            data = json.loads(text)
+            def walk(x):
+                if isinstance(x, str): out.append(x)
+                elif isinstance(x, list):
+                    for i in x: walk(i)
+                elif isinstance(x, dict):
+                    for v in x.values(): walk(v)
+            walk(data)
+            return '\n'.join(out)
+        except Exception:
+            pass
+    if '<a ' in text or '<A ' in text or '</' in text[:5000]:
+        hrefs = re.findall(r'href\s*=\s*["\']([^"\']+)["\']', text, re.I)
+        out.extend(html.unescape(h) for h in hrefs)
+        body = re.sub(r'<[^>]+>', ' ', text)
+        out.append(html.unescape(body))
+        return '\n'.join(out)
+    return text
+
+
+def load_imported_links(path=TG_IMPORT_FILE):
+    try:
+        with open(path, 'r', encoding='utf-8') as f: return f.read()
+    except Exception:
+        return ''
+
+
+def save_imported_proxies(proxies, path=TG_IMPORT_FILE):
+    """Дописывает ссылки импортированных прокси в файл (без повторов). Возвращает (добавлено, всего)."""
+    have = set(l.strip() for l in load_imported_links(path).splitlines() if l.strip())
+    new = [p['link'] for p in proxies if p.get('link') and p['link'] not in have]
+    if new:
+        with open(path, 'a', encoding='utf-8') as f: f.write('\n'.join(new) + '\n')
+    return len(new), len(have) + len(new)
+
+
+def clear_imported(path=TG_IMPORT_FILE):
+    try: os.remove(path)
+    except FileNotFoundError: pass
+
+
+TG_READER_HOP_LIMIT = 10
+_NOT_CHANNEL_WORDS = frozenset(('proxy','socks','webproxy','joinchat','addstickers','addtheme','setlanguage','share','iv','c','s','login',
+                               'bot','boost','confirmphone','contact','invoice','addemoji','msg','giftcode','m','dl','blog','faq','apps','privacy'))
+
+def extract_channel_mentions(text):
+    """Имена публичных каналов из ссылок t.me/<имя> в тексте (кроме служебных вроде t.me/proxy).
+    Ссылки на ботов (…bot) и инвайты (+/joinchat) пропускаются."""
+    out = []
+    for m in re.finditer(r'(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:s/)?([A-Za-z][A-Za-z0-9_]{3,31})(?![A-Za-z0-9_])', text or ''):
+        n = m.group(1)
+        if n.lower() in _NOT_CHANNEL_WORDS or n.lower().endswith('bot') or n in out: continue
+        out.append(n)
+    return out
+
+
+def parse_user_mtproto(text):
+    """MTProto-прокси, указанные пользователем вручную (для входа в Telegram и чтения каналов).
+    Понимает tg://proxy?…, https://t.me/proxy?…, «хост:порт:секрет» и «хост порт секрет»
+    (через пробел, запятую или перенос строки). Возвращает список прокси-словарей."""
+    text = text or ''
+    out = {}
+    for p in parse_proxies(text, types=('mtproto',)):
+        out[(p['server'], int(p['port']), p['secret'])] = p
+    for m in re.finditer(r'(?<![\w.\-])([A-Za-z0-9](?:[A-Za-z0-9.\-]{1,253}))[:\s,]+(\d{2,5})[:\s,]+((?:ee|dd)?[0-9a-fA-F]{32,}|[A-Za-z0-9_\-]{22,}={0,2})(?![\w])', text):
+        host, port, secret = m.group(1), int(m.group(2)), m.group(3)
+        if not (1 <= port <= 65535) or (host, port, secret) in out: continue
+        link = f"tg://proxy?server={urllib.parse.quote(host)}&port={port}&secret={urllib.parse.quote(secret)}"
+        out[(host, port, secret)] = {'server': host, 'port': port, 'secret': secret, 'ptype': 'mtproto', 'link': link}
+    return list(out.values())
+
+
+def parse_channel_list(text):
+    """«name1, @name2 t.me/name3» -> ['name1','name2','name3'] (без повторов, порядок сохранён)."""
+    out = []
+    for tok in re.split(r'[\s,;]+', text or ''):
+        tok = tok.strip()
+        if not tok: continue
+        tok = re.sub(r'^(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:s/)?', '', tok, flags=re.I).lstrip('@').split('?')[0].split('/')[0]
+        if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{3,31}', tok) and tok not in out: out.append(tok)
+    return out
+
+
+def recheck_proxy(p,timeout=2.6):
+    """Пере-проверка уже показанного прокси автопроверкой ping (v32): тем же протокольным
+    методом, что и отбор (check_proxy_online), а не простым TCP-коннектом. «offline»
+    выставляется только после двух неудач подряд (_fails) — единичный сбой не бракует
+    прокси. Возвращает p."""
+    try: ok,ms,ip,err,method=check_proxy_online(p,timeout)
+    except Exception as e: ok,ms,ip,err,method=False,None,None,str(e),'error'
+    if ok:
+        p.update(ok=True,ping=ms,ip=ip or p.get('ip'),error=None,_fails=0)
+    else:
+        n=p.get('_fails',0)+1; p['_fails']=n
+        if n>=2: p.update(ok=False,ping=None,error=err)
+    return p
+
+
+def explain_scan_result(checked,found,target,max_ping,diag,dynamic=False,sources_loaded=0,candidates=0):
+    """(краткая сводка, подсказка) — почему найдено меньше, чем нужно (v31). Раньше при
+    пустом результате в логе не было различия между «все прокси мертвы», «онлайн, но
+    медленнее лимита Макс. ping» и «отсеяны фильтрами». Подсказка — только когда причина
+    видна по данным; иначе пустая строка."""
+    slow=sorted(diag.get('slow') or [])
+    parts=[f'проверено {checked}']
+    if diag.get('tcp_fail'): parts.append(f'порт не отвечает: {diag["tcp_fail"]}')
+    if diag.get('proto_fail'): parts.append(f'не прошли проверку протокола: {diag["proto_fail"]}')
+    if slow: parts.append(f'онлайн, но ping выше {max_ping:.0f} ms: {len(slow)} (от {slow[0]:.0f} до {slow[-1]:.0f}, медиана {slow[len(slow)//2]:.0f})')
+    if diag.get('geo_filtered'): parts.append(f'отсеяно фильтром страны/провайдера: {diag["geo_filtered"]}')
+    if diag.get('unstable'): parts.append(f'не прошли проверку стабильности: {diag["unstable"]}')
+    summary='; '.join(parts)
+    hint=''
+    if found>=target: return summary,hint
+    if slow and (found==0 or len(slow)>=3):
+        q1=slow[len(slow)//4]
+        suggest=int(math.ceil(max(q1,max_ping)*1.25/50.0)*50)
+        hint=(f'Рабочие прокси есть, но все медленнее лимита «Макс. ping» = {max_ping:.0f} ms: онлайн {len(slow)} шт., '
+              f'их ping — от {slow[0]:.0f} до {slow[-1]:.0f} ms (медиана {slow[len(slow)//2]:.0f}). '
+              f'Увеличьте «Макс. ping» (например, до {suggest}) в настройках и повторите.')
+    elif checked and (diag.get('tcp_fail',0)+diag.get('proto_fail',0))>=0.95*checked and not slow:
+        hint=(f'Из {checked} проверенных прокси не ответил ни один — это похоже на устаревшие списки либо на блокировку '
+              f'такого трафика вашим провайдером. Попробуйте другой источник/встроенный список, другую сеть или VPN.')
+    elif diag.get('geo_filtered') and found==0:
+        hint='Прокси онлайн есть, но их отсеял фильтр страны/провайдера — сбросьте фильтр на вкладке «Сканирование» и повторите.'
+    elif dynamic and candidates and sources_loaded<=8 and found==0:
+        hint=(f'Динамический поиск нашёл всего {sources_loaded} источников ({candidates} кандидатов) — при включённом динамическом поиске '
+              f'встроенный список не используется. Отключите динамический поиск, чтобы взять проверенные встроенные источники, '
+              f'либо укажите «GitHub token» (меньше лимитов) и увеличьте «Время поиска».')
+    return summary,hint
 
 
 def resolve_ip(host):
@@ -1654,7 +2347,7 @@ def _mtproxy_header(secret, mode='standard', dc_id=2):
     # The first 56 bytes remain random; only bytes 56..63 are encrypted with the
     # continuous AES-CTR stream. See Telegram transport obfuscation / Telethon's
     # MTProxyIO implementation.
-    key=secret
+    key=secret  # None — прямое соединение с дата-центром Telegram без прокси-секрета (v33)
     tag=b'\xdd\xdd\xdd\xdd' if mode=='dd' else b'\xee\xee\xee\xee'
     # Reserved first-4-byte patterns a real MTProxy server also refuses, per Telegram's
     # obfuscated2 transport spec (HTTP verbs, a TLS record header, and the dd/ee tags
@@ -1665,8 +2358,14 @@ def _mtproxy_header(secret, mode='standard', dc_id=2):
         if rnd[0]==0xef or bytes(rnd[:4]) in keywords or rnd[4:8]==b'\x00\x00\x00\x00': continue
         break
     rev=bytes(rnd[55:7:-1])
-    enc_key=hashlib.sha256(bytes(rnd[8:40])+key).digest(); enc_iv=bytes(rnd[40:56])
-    dec_key=hashlib.sha256(rev[:32]+key).digest(); dec_iv=rev[32:48]
+    if key is None:
+        # Обфускация MTProto при прямом подключении к DC (без MTProxy): ключи — просто
+        # байты заголовка, без примеси секрета прокси.
+        enc_key=bytes(rnd[8:40]); enc_iv=bytes(rnd[40:56])
+        dec_key=rev[:32]; dec_iv=rev[32:48]
+    else:
+        enc_key=hashlib.sha256(bytes(rnd[8:40])+key).digest(); enc_iv=bytes(rnd[40:56])
+        dec_key=hashlib.sha256(rev[:32]+key).digest(); dec_iv=rev[32:48]
     enc=_AESCTRState(enc_key,enc_iv); dec=_AESCTRState(dec_key,dec_iv)
     rnd[56:60]=tag; rnd[60:62]=struct.pack('<h',dc_id)
     encrypted_tail=enc.crypt(bytes(rnd))[56:64]
@@ -1808,11 +2507,23 @@ class _FakeTLSSocket:
             self._buf.extend(data)
         out=bytes(self._buf[:n]); del self._buf[:n]
         return out
+    def recv_some(self,n):
+        """Отдаёт то, что уже пришло (не ждёт ровно n байт) — для двусторонней перекачки (мост)."""
+        while not self._buf:
+            hdr=_read_exact(self.sock,5)
+            if hdr[0:1] not in (b'\x14',b'\x17'):
+                raise RuntimeError('FakeTLS: неожиданный тип TLS-записи в потоке')
+            ln=struct.unpack('>H',hdr[3:5])[0]
+            data=_read_exact(self.sock,ln)
+            if hdr[0:1]==b'\x14': continue
+            self._buf.extend(data)
+        out=bytes(self._buf[:n]); del self._buf[:n]
+        return out
     def close(self):
         try:self.sock.close()
         except Exception:pass
 
-def _mtproxy_session_open(p,timeout=3.0):
+def _mtproxy_session_open(p,timeout=3.0,dc_id=2,tag_mode=None):
     host=p['server']; port=int(p['port'])
     kind=classify_secret(p.get('secret',''))
     if kind=='ee':
@@ -1829,12 +2540,13 @@ def _mtproxy_session_open(p,timeout=3.0):
         # Inside a FakeTLS tunnel a real client always uses the "secure"/padded
         # obfuscated2 transport (tag 0xdddddddd) - see PROTO_TAG_SECURE handling in the
         # reference server, which refuses any other tag once is_tls_handshake is true.
-        header,enc,dec,mode=_mtproxy_header(key16,'dd',2)
+        header,enc,dec,mode=_mtproxy_header(key16,'dd',dc_id)
         s.sendall(header)
         return s,enc,dec,mode
     secret,mode=_mt_secret(p.get('secret',''))
+    if tag_mode in ('dd','standard'): mode=tag_mode   # v33: мост сохраняет формат пакетов клиента
     s=socket.create_connection((host,port),timeout=timeout); s.settimeout(timeout)
-    header,enc,dec,mode=_mtproxy_header(secret,mode,2)
+    header,enc,dec,mode=_mtproxy_header(secret,mode,dc_id)
     s.sendall(header)
     return s,enc,dec,mode
 
@@ -1996,71 +2708,108 @@ STABILITY_MAX_PING_DEFAULT=100.0  # запасное значение, если 
 _PROXY_CHECK_TARGET_HOST='core.telegram.org'
 _PROXY_CHECK_TARGET_PORT=443
 
-def _check_socks5(p,timeout):
-    """Настоящее SOCKS5-рукопожатие (RFC 1928/1929) + CONNECT до Telegram — открытый
-    порт, который не говорит по SOCKS5, или говорит, но не может докуда-либо
-    достучаться, отбраковывается, а не засчитывается как рабочий прокси."""
-    ip=resolve_ip(p['server'])
-    if not ip: return False,None,None,'DNS failed','socks5'
-    user=p.get('user') or None; pwd=p.get('password') or ''
-    started=time.perf_counter()
-    try:
-        with socket.create_connection((ip,p['port']),timeout=timeout) as s:
-            s.settimeout(timeout)
-            s.sendall(b'\x05'+(b'\x02\x00\x02' if user else b'\x01\x00'))
-            resp=_read_exact(s,2)
-            if resp[0]!=5: return False,None,ip,'не SOCKS5 (неверная версия в ответе)','socks5'
-            method=resp[1]
-            if method==0xFF: return False,None,ip,'сервер не принял ни одного метода авторизации','socks5'
-            if method==2:
-                if not user: return False,None,ip,'сервер требует логин/пароль, которых нет','socks5'
-                ub=user.encode('utf-8')[:255]; pb=pwd.encode('utf-8')[:255]
-                s.sendall(b'\x01'+bytes([len(ub)])+ub+bytes([len(pb)])+pb)
-                r=_read_exact(s,2)
-                if r[1]!=0: return False,None,ip,'неверный логин/пароль SOCKS5','socks5'
-            host_b=_PROXY_CHECK_TARGET_HOST.encode('ascii')
-            req=b'\x05\x01\x00\x03'+bytes([len(host_b)])+host_b+struct.pack('>H',_PROXY_CHECK_TARGET_PORT)
-            s.sendall(req)
-            rep=_read_exact(s,4)
-            if rep[1]!=0: return False,None,ip,f'SOCKS5 CONNECT отклонён (код {rep[1]})','socks5'
-            atyp=rep[3]
-            if atyp==1: _read_exact(s,4+2)
-            elif atyp==3: n=_read_exact(s,1)[0]; _read_exact(s,n+2)
-            elif atyp==4: _read_exact(s,16+2)
-            ms=round((time.perf_counter()-started)*1000,1)
-            return True,ms,ip,None,'socks5'
-    except Exception as e:
-        return False,None,ip,str(e),'socks5'
+# v33 (пункты №2 и №3 обращения: «SOCKS5/HTTP, которые находит программа, не работают в
+# Telegram, но в программе отображаются как онлайн»). Причина: раньше проверка
+# заканчивалась на «прокси ответил, что туннель до core.telegram.org:443 открыт» — для
+# SOCKS5 это просто код 0 в ответе, для HTTP — строка «200». Это проходят: (а) прокси,
+# которые отвечают «успех» на любой CONNECT, ничего никуда не открывая; (б) прокси,
+# пропускающие обычные сайты, но режущие серверы Telegram по IP (а клиент Telegram ходит
+# именно на IP дата-центров 149.154.x.x / 91.108.x.x, а не на core.telegram.org);
+# (в) прокси, подменяющие TLS (в логе пользователя именно такой попался: curl через
+# найденный прокси давал «SEC_E_UNTRUSTED_ROOT»). Теперь после открытия туннеля программа
+# делает ровно то, что делает сам Telegram: подключается к IP настоящего дата-центра и
+# проводит настоящий обмен MTProto (req_pq_multi → ResPQ с подлинным RSA-ключом
+# Telegram, см. _verify_telegram_fingerprint). Подделать это без реальной связи с
+# Telegram нельзя.
+TELEGRAM_DC_PROBE_TARGETS=(('149.154.167.51',443,2),('149.154.167.91',443,4))  # DC2, DC4 — публичные адреса (в Telethon/Pyrogram по умолчанию)
 
+def _mtproto_probe_over_stream(s,timeout,dc_id=2):
+    """Настоящий обмен MTProto (прямой, без секрета прокси) по уже открытому через
+    прокси туннелю до дата-центра Telegram. Возвращает мс одного кругового обмена или
+    бросает исключение."""
+    header,enc,dec,mode=_mtproxy_header(None,'standard',dc_id)
+    s.sendall(header)
+    return _mtproxy_request(s,enc,dec,mode,{'last':0},timeout=timeout)
+
+def _socks5_connect(s,host_or_ip,port,user,pwd):
+    """SOCKS5-рукопожатие + CONNECT. host_or_ip — IPv4-строка (atyp=1) либо доменное имя."""
+    s.sendall(b'\x05'+(b'\x02\x00\x02' if user else b'\x01\x00'))
+    resp=_read_exact(s,2)
+    if resp[0]!=5: raise RuntimeError('не SOCKS5 (неверная версия в ответе)')
+    method=resp[1]
+    if method==0xFF: raise RuntimeError('сервер не принял ни одного метода авторизации')
+    if method==2:
+        if not user: raise RuntimeError('сервер требует логин/пароль, которых нет')
+        ub=user.encode('utf-8')[:255]; pb=pwd.encode('utf-8')[:255]
+        s.sendall(b'\x01'+bytes([len(ub)])+ub+bytes([len(pb)])+pb)
+        r=_read_exact(s,2)
+        if r[1]!=0: raise RuntimeError('неверный логин/пароль SOCKS5')
+    elif method!=0: raise RuntimeError(f'неподдерживаемый метод авторизации SOCKS5: {method}')
+    try:
+        addr=b'\x01'+socket.inet_aton(host_or_ip)
+    except OSError:
+        hb=host_or_ip.encode('ascii'); addr=b'\x03'+bytes([len(hb)])+hb
+    s.sendall(b'\x05\x01\x00'+addr+struct.pack('>H',port))
+    rep=_read_exact(s,4)
+    if rep[1]!=0: raise RuntimeError(f'SOCKS5 CONNECT отклонён (код {rep[1]})')
+    atyp=rep[3]
+    if atyp==1: _read_exact(s,4+2)
+    elif atyp==3: n=_read_exact(s,1)[0]; _read_exact(s,n+2)
+    elif atyp==4: _read_exact(s,16+2)
+
+def _http_connect(s,host,port,user=None,pwd=''):
+    """HTTP CONNECT-туннель (RFC 7231); бросает исключение, если прокси не ответил 200."""
+    target=f'{host}:{port}'
+    lines=[f'CONNECT {target} HTTP/1.1',f'Host: {target}','Proxy-Connection: Keep-Alive']
+    if user:
+        b64=base64.b64encode(f"{user}:{pwd or ''}".encode('utf-8')).decode('ascii')
+        lines.append(f'Proxy-Authorization: Basic {b64}')
+    s.sendall(('\r\n'.join(lines)+'\r\n\r\n').encode('ascii','ignore'))
+    resp=b''
+    while b'\r\n\r\n' not in resp and len(resp)<8192:
+        chunk=s.recv(4096)
+        if not chunk: break
+        resp+=chunk
+    line=resp.split(b'\r\n',1)[0].decode('latin-1','replace')
+    if not re.match(r'^HTTP/1\.[01]\s+200\b',line):
+        raise RuntimeError(f'HTTP CONNECT отклонён: {line[:100] or "пустой ответ"}')
+    # Всё, что прокси прислал ПОСЛЕ заголовков (бывает у «болтливых» прокси), туннелю не принадлежит.
+    if resp.split(b'\r\n\r\n',1)[1:] and resp.split(b'\r\n\r\n',1)[1]:
+        raise RuntimeError('прокси прислал лишние данные после CONNECT')
+
+def _check_via_tunnel(p,timeout,ptype,open_tunnel):
+    """Общий каркас проверки SOCKS5/HTTP: TCP до прокси → туннель до IP дата-центра
+    Telegram (open_tunnel) → настоящий обмен MTProto. Пробует DC2, затем DC4 (разные
+    адреса — чтобы единичная блокировка одного IP не браковала хороший прокси)."""
+    ip=resolve_ip(p['server'])
+    if not ip: return False,None,None,'DNS failed',ptype
+    started=time.perf_counter(); last_err='нет ответа'
+    stage_timeout=max(timeout,4.0)  # мёртвые прокси отсеиваются по короткому connect-таймауту, живым даём время дойти до Telegram
+    for dc_ip,dc_port,dc_id in TELEGRAM_DC_PROBE_TARGETS:
+        try:
+            with socket.create_connection((ip,p['port']),timeout=min(timeout,2.6)) as s:
+                s.settimeout(stage_timeout)
+                open_tunnel(s,dc_ip,dc_port)
+                _mtproto_probe_over_stream(s,stage_timeout,dc_id)
+                ms=round((time.perf_counter()-started)*1000,1)
+                return True,ms,ip,None,ptype
+        except Exception as e:
+            last_err=str(e) or type(e).__name__
+            # если сам прокси не отвечает/не говорит на своём протоколе — вторая попытка смысла не имеет
+            if isinstance(e,(ConnectionRefusedError,socket.gaierror)) or 'не SOCKS5' in last_err or 'авторизац' in last_err or 'логин' in last_err:
+                break
+    return False,None,ip,f'до серверов Telegram не дошёл: {last_err}',ptype
+
+def _check_socks5(p,timeout):
+    """SOCKS5 (RFC 1928/1929) + туннель до настоящего дата-центра Telegram + настоящий
+    обмен MTProto (см. комментарий выше про v33)."""
+    user=p.get('user') or None; pwd=p.get('password') or ''
+    return _check_via_tunnel(p,timeout,'socks5',lambda s,h,pt:_socks5_connect(s,h,pt,user,pwd))
 
 def _check_http_proxy(p,timeout):
-    """Настоящий HTTP CONNECT-туннель до Telegram через прокси (RFC 7231) — тот же
-    принцип: подтверждаем, что прокси реально может протащить TLS-трафик до
-    core.telegram.org, а не просто держит порт открытым."""
-    ip=resolve_ip(p['server'])
-    if not ip: return False,None,None,'DNS failed','http'
-    started=time.perf_counter()
-    try:
-        with socket.create_connection((ip,p['port']),timeout=timeout) as s:
-            s.settimeout(timeout)
-            target=f'{_PROXY_CHECK_TARGET_HOST}:{_PROXY_CHECK_TARGET_PORT}'
-            lines=[f'CONNECT {target} HTTP/1.1',f'Host: {target}','Proxy-Connection: Keep-Alive']
-            if p.get('user'):
-                b64=base64.b64encode(f"{p['user']}:{p.get('password','')}".encode('utf-8')).decode('ascii')
-                lines.append(f'Proxy-Authorization: Basic {b64}')
-            s.sendall(('\r\n'.join(lines)+'\r\n\r\n').encode('ascii','ignore'))
-            resp=b''
-            while b'\r\n\r\n' not in resp and len(resp)<8192:
-                chunk=s.recv(4096)
-                if not chunk: break
-                resp+=chunk
-            line=resp.split(b'\r\n',1)[0].decode('latin-1','replace')
-            ms=round((time.perf_counter()-started)*1000,1)
-            if re.match(r'^HTTP/1\.[01]\s+200\b',line):
-                return True,ms,ip,None,'http'
-            return False,None,ip,f'HTTP CONNECT отклонён: {line[:100] or "пустой ответ"}','http'
-    except Exception as e:
-        return False,None,ip,str(e),'http'
+    """HTTP CONNECT (RFC 7231) до настоящего дата-центра Telegram + настоящий обмен
+    MTProto (см. комментарий выше про v33)."""
+    return _check_via_tunnel(p,timeout,'http',lambda s,h,pt:_http_connect(s,h,pt,p.get('user'),p.get('password','')))
 
 
 def _check_web_proxy(p,timeout,ssl_context=None,port=443):
@@ -2236,8 +2985,8 @@ def _stability_test_generic(p,seconds,stop_event,abort_event,check_once,max_ping
         log(f'STABILITY {"PASS" if passed else "FAIL"} {p["server"]}:{p["port"]} checks={checks} worst={worst:.1f} elapsed={elapsed:.2f}')
         return passed,(None if passed else 'недостаточно успешных проверок')
     except Exception as e:
-        log(f'STABILITY ERROR {p["server"]}:{p["port"]}: {e}',True)
-        return False,str(e)
+        log(f'STABILITY FAIL {p["server"]}:{p["port"]}: не удалось установить/удержать соединение ({type(e).__name__}: {e})')
+        return False,f'соединение не установлено: {e}'
     finally:
         NET_GATE.release()
 
@@ -2428,10 +3177,48 @@ class App:
                        'dynamic_target':40,'concurrency':64,'dynamic_sources':False,'enhanced_search':False,
                        'discovery_time':25,'topup_rounds':MAX_TOPUP_ROUNDS,'github_token':'','telegram_proxy':'','tg_gateways':True,'ptype_mtproto':True,'ptype_socks5':False,'ptype_http':False,'ptype_web':False}
         self._filter_state={}
-        log(f'APP START version=v30 crypto_backend={"cryptography" if _HAS_CRYPTOGRAPHY else "pure-python"} icons_backend={"pillow" if _HAS_PIL else "none(fallback text)"} python={sys.version.split()[0]} platform={platform.platform()} executable={sys.executable} log={LOG_FILE}')
+        log(f'APP START version=v33 crypto_backend={"cryptography" if _HAS_CRYPTOGRAPHY else "pure-python"} icons_backend={"pillow" if _HAS_PIL else "none(fallback text)"} python={sys.version.split()[0]} platform={platform.platform()} executable={sys.executable} log={LOG_FILE}')
         self._build_styles(); self._build_ui()
+        self._install_clipboard_shortcuts()
         self.load_settings(silent=True)  # restore whatever the person saved last time, quietly
         root.after(80,self.poll); threading.Thread(target=self.ping_loop,daemon=True).start()
+
+    def _install_clipboard_shortcuts(self):
+        """v33: Ctrl+V/C/X/A в полях ввода работают при ЛЮБОЙ раскладке клавиатуры. Tk
+        привязывает эти сочетания к keysym (латинские v/c/x/a), а при русской раскладке
+        Ctrl+V даёт keysym «Cyrillic_em» — вставка молча не срабатывала, пока не
+        переключишься на английскую. Здесь сочетание распознаётся по физическому коду
+        клавиши (на Windows — VK-коды A/C/V/X), как это делают нормальные программы. Плюс
+        контекстное меню правой кнопкой (Вырезать/Копировать/Вставить/Выделить всё)."""
+        win=sys.platform=='win32'
+        vk={86:'<<Paste>>',67:'<<Copy>>',88:'<<Cut>>',65:'<<SelectAll>>'}
+        classes=('TEntry','Entry','TCombobox','Text')
+        def on_ctrl(event):
+            try:
+                w=event.widget
+                if w.winfo_class() not in classes: return None
+                if str(event.keysym).lower() in ('v','c','x','a'): return None  # латиница — штатная привязка Tk уже сработает
+                ev=vk.get(event.keycode) if win else None
+                if not ev: return None
+                w.event_generate(ev)
+                return 'break'
+            except Exception:
+                return None
+        self.root.bind_all('<Control-KeyPress>',on_ctrl,add='+')
+        menu=tk.Menu(self.root,tearoff=0)
+        target={'w':None}
+        for label,ev in (('Вырезать','<<Cut>>'),('Копировать','<<Copy>>'),('Вставить','<<Paste>>'),('Выделить всё','<<SelectAll>>')):
+            menu.add_command(label=label,command=lambda e=ev:target['w'] is not None and target['w'].event_generate(e))
+        def on_right(event):
+            try:
+                w=event.widget
+                if w.winfo_class() not in classes: return None
+                target['w']=w; w.focus_set(); menu.tk_popup(event.x_root,event.y_root)
+            finally:
+                try: menu.grab_release()
+                except Exception: pass
+            return 'break'
+        self.root.bind_all('<Button-3>',on_right,add='+')
 
     def _build_styles(self):
         s=ttk.Style();
@@ -2599,10 +3386,14 @@ class App:
         self._set_btn_icon(self.save_settings_btn,'save','ghost')
         self._action_labels[self.save_settings_btn]=('Сохранить настройки','Сохр.')
         ToolTip(self.save_settings_btn,'Сохранить текущие настройки в файл — при следующем запуске они подгрузятся автоматически.')
-        self.load_settings_btn=ttk.Button(toolbar,text='Загрузить настройки',compound='left',style='Ghost.TButton',command=lambda:self.load_settings(silent=False)); self.load_settings_btn.grid(row=0,column=1)
+        self.load_settings_btn=ttk.Button(toolbar,text='Загрузить настройки',compound='left',style='Ghost.TButton',command=lambda:self.load_settings(silent=False)); self.load_settings_btn.grid(row=0,column=1,padx=(0,8))
         self._set_btn_icon(self.load_settings_btn,'folder','ghost')
         self._action_labels[self.load_settings_btn]=('Загрузить настройки','Загр.')
         ToolTip(self.load_settings_btn,'Перечитать файл настроек вручную (например, если вы поправили его руками).')
+        self.recommended_btn=ttk.Button(toolbar,text='Рекомендуемые настройки',compound='left',style='Ghost.TButton',command=self.apply_recommended); self.recommended_btn.grid(row=0,column=2)
+        self._set_btn_icon(self.recommended_btn,'gear','ghost')
+        self._action_labels[self.recommended_btn]=('Рекомендуемые настройки','Рекоменд.')
+        ToolTip(self.recommended_btn,'Выставить проверенный набор: 10 прокси, ping до 300 мс, динамический и улучшенный поиск (40 источников, 300 с, 3 дозапроса), только MTProto, 256 параллельных проверок, автопроверка ping, проверка стабильности 3 с, фиксированный порядок. Остальное (токены, вход в Telegram, фильтры) не меняется.')
 
         self.settings_canvas=tk.Canvas(f,bg=COLORS['bg'],highlightthickness=0)
         self.settings_canvas.grid(row=1,column=0,sticky='new')
@@ -2627,6 +3418,10 @@ class App:
         self.tg_gateways=tk.BooleanVar(value=True)
         self.github_token_var=tk.StringVar(value='')
         self.telegram_proxy_var=tk.StringVar(value='')
+        self.tg_reader=tk.BooleanVar(value=False); self.tg_api_id_var=tk.StringVar(value=''); self.tg_api_hash_var=tk.StringVar(value='')
+        self.tg_phone_var=tk.StringVar(value=''); self.tg_channels_var=tk.StringVar(value=''); self.tg_mtproto_var=tk.StringVar(value=''); self.tg_status_var=tk.StringVar(value='')
+        self.imported_var=tk.StringVar(value='')
+        self.discovery_cache=tk.BooleanVar(value=True)
         self.auto_ping=tk.BooleanVar(value=True); self.only_ok=tk.BooleanVar(value=False)
         self.stability_enabled=tk.BooleanVar(value=False); self.stability_seconds_var=tk.StringVar(value='3')
         self.lock_order=tk.BooleanVar(value=False); self._order_counter=0
@@ -2671,6 +3466,7 @@ class App:
         gw_wrap=ttk.Frame(tp_box,style='Panel.TFrame'); gw_wrap.grid(row=2,column=0,sticky='w',pady=(8,0))
         self._check(gw_wrap,0,0,'Обходить блокировку t.me через зеркала и публичные шлюзы',self.tg_gateways,command=self.sync_settings,help_text='Если t.me недоступен напрямую, программа по очереди пробует: официальные псевдонимы домена (telegram.me, telegram.dog, tx.me), затем публичные сервисы-«читалки» (r.jina.ai, allorigins, codetabs, corsproxy.io, RSSHub), которые сами скачивают публичную страницу канала и отдают её вам — для вашей сети это обычный запрос к стороннему сайту, а не к Telegram. Каждый ответ проверяется по содержимому (должны быть настоящие посты). Наружу уходит только имя ПУБЛИЧНОГО канала. Не поможет, если заблокированы все адреса Telegram и недоступны сами шлюзы — тогда поиск идёт по GitHub и сайтам. Снимите галочку, если не хотите обращаться к сторонним сервисам.',padx=(0,0))
 
+        self._check(card1,14,0,'Запоминать найденные источники на 6 часов',self.discovery_cache,command=self.sync_settings,help_text='Поиск источников — самая долгая часть сканирования (до полутора минут ожидания лимита GitHub API). Адреса найденных списков меняются редко, а сами списки скачиваются заново при каждом скане, поэтому повторное сканирование начинается сразу. Если прокси не хватает, дозапрос всё равно ищет новые источники. Снимите галочку, чтобы каждый раз искать источники заново.',padx=(0,0))
         self.card1_outer=card1.master
 
         # Карточка 2 — автоматика и производительность
@@ -2685,6 +3481,34 @@ class App:
         self._check(card2,6,0,'Зафиксировать порядок',self.lock_order,command=self.render_current,help_text='Не переставлять строки местами при обновлении пинга — удобно, если вы наводите курсор на список во время автопроверки.',padx=(0,0))
         ttk.Label(card2,text='Ping выше «Макс. ping» в любой момент — прокси сразу отсеивается.',style='Muted.TLabel',wraplength=230,justify='left').grid(row=6,column=1,sticky='w',pady=(3,0))
         self.card2_outer=card2.master
+
+        # Карточка 3 (v33, пункт №5) — чтение Telegram-каналов через MTProto + импорт из файла/текста.
+        card3=self._card(params,1,0,'✈️','Чтение Telegram-каналов через MTProto',columnspan=2,accent=COLORS['yellow'])
+        self.card3_outer=card3.master; self.card3_outer.grid_configure(pady=(10,0))
+        self._check(card3,1,0,'Читать тг-каналы через MTProto (вход в Telegram)',self.tg_reader,command=self.sync_settings,help_text='Когда t.me недоступен, а SOCKS5/HTTP найти нельзя, единственный надёжный путь — читать каналы так же, как это делает сам Telegram: по MTProto, через найденные и проверенные MTProto-прокси. Анонимно историю канала по MTProto читать нельзя — нужен вход в ваш аккаунт с вашими api_id/api_hash (бесплатно: my.telegram.org → API development tools). Программа сама подберёт рабочие MTProto-прокси (в том числе FakeTLS), войдёт через них, прочитает последние 50 сообщений каналов (текст, скрытые ссылки в тексте и кнопках, небольшие .txt/.json-вложения) и добавит найденные прокси в кандидаты. Если чтение не удалось — используются обычные маршруты (t.me, зеркала, шлюзы).',padx=(0,0))
+        self._entry(card3,2,0,'api_id',self.tg_api_id_var,'',help_text='Число с my.telegram.org → API development tools → Create application.')
+        self._entry(card3,2,1,'api_hash',self.tg_api_hash_var,'',help_text='Строка из 32 символов с той же страницы. Хранится в файле настроек на этом компьютере открытым текстом — никому не показывайте и не отправляйте файл настроек.',show='•')
+        self._entry(card3,3,0,'Телефон (с кодом страны)',self.tg_phone_var,'',help_text='Номер аккаунта Telegram, под которым программа будет читать каналы, например +79991234567. Нужен только для входа; код придёт в Telegram. Лучше использовать запасной аккаунт, не основной.')
+        self._entry(card3,3,1,'Свои каналы',self.tg_channels_var,'',help_text='Дополнительные публичные каналы (через пробел или запятую): имя, @имя или ссылка t.me/имя. Читаются вместе со встроенными и найденными.')
+        tm_box=ttk.Frame(card3,style='Panel.TFrame'); tm_box.grid(row=4,column=0,columnspan=2,sticky='ew',pady=(0,10)); tm_box.columnconfigure(0,weight=1)
+        tm_cap=ttk.Frame(tm_box,style='Panel.TFrame'); tm_cap.grid(row=0,column=0,sticky='w',pady=(0,5)); ttk.Label(tm_cap,text='Свой MTProto-прокси для входа и чтения (необязательно)',style='Muted.TLabel').pack(side='left')
+        self._help_badge(tm_cap,'Если автоподбор не находит рабочий прокси, укажите свой: ссылку tg://proxy?server=…&port=…&secret=… или https://t.me/proxy?…, либо «хост:порт:секрет». Можно несколько — через пробел или запятую. Эти прокси пробуются ПЕРВЫМИ и для входа, и при каждом сканировании; если не сработают — программа подберёт другие сама. Подходят любые секреты, в том числе FakeTLS (ee…).').pack(side='left',padx=(5,0))
+        ttk.Entry(tm_box,textvariable=self.tg_mtproto_var,width=46).grid(row=1,column=0,sticky='ew')
+        ttk.Label(card3,textvariable=self.tg_status_var,style='Muted.TLabel',wraplength=900,justify='left').grid(row=5,column=0,columnspan=2,sticky='w',pady=(0,8))
+        btns3=ttk.Frame(card3,style='Panel.TFrame'); btns3.grid(row=6,column=0,columnspan=2,sticky='w',pady=(0,4))
+        ttk.Button(btns3,text='Войти в Telegram…',style='Ghost.TButton',command=self.tg_login).pack(side='left',padx=(0,8))
+        ttk.Button(btns3,text='Выйти (удалить сессию)',style='Ghost.TButton',command=self.tg_logout).pack(side='left',padx=(0,8))
+        ttk.Button(btns3,text='Где взять api_id',style='Ghost.TButton',command=lambda:webbrowser.open('https://my.telegram.org/apps')).pack(side='left')
+        ttk.Label(card3,text='Сессия входа хранится в файле рядом с настройками и даёт доступ к аккаунту — не передавайте её. Вход нужен один раз. Программа только читает публичные каналы.',style='Muted.TLabel',wraplength=900,justify='left').grid(row=7,column=0,columnspan=2,sticky='w',pady=(0,2))
+        ttk.Separator(card3,orient='horizontal').grid(row=8,column=0,columnspan=2,sticky='ew',pady=(11,11))
+        ttk.Label(card3,text='Импорт ссылок без входа в Telegram',style='Caption.TLabel').grid(row=9,column=0,columnspan=2,sticky='w',pady=(0,7))
+        btns4=ttk.Frame(card3,style='Panel.TFrame'); btns4.grid(row=10,column=0,columnspan=2,sticky='w',pady=(0,6))
+        ttk.Button(btns4,text='Импорт из файла…',style='Ghost.TButton',command=self.import_from_file).pack(side='left',padx=(0,8))
+        ttk.Button(btns4,text='Вставить текст…',style='Ghost.TButton',command=self.import_from_text).pack(side='left',padx=(0,8))
+        ttk.Button(btns4,text='Очистить импорт',style='Ghost.TButton',command=self.import_clear).pack(side='left')
+        ttk.Label(card3,textvariable=self.imported_var,style='Muted.TLabel',wraplength=900,justify='left').grid(row=11,column=0,columnspan=2,sticky='w')
+        ttk.Label(card3,text='Подходит файл экспорта Telegram Desktop (канал → ⋮ → Экспорт истории чата, формат JSON или HTML: ссылки в нём сохраняются), любой текстовый файл или просто скопированные сообщения. Ссылки сохраняются и проверяются при каждом сканировании (только выбранных видов).',style='Muted.TLabel',wraplength=900,justify='left').grid(row=12,column=0,columnspan=2,sticky='w',pady=(4,0))
+        self._refresh_tg_status(); self._refresh_imported()
 
     def _build_tab_scan(self,parent):
         """Вкладка "Сканирование": лог/экспорт/скан/стоп, статистика, таблица
@@ -2741,7 +3565,7 @@ class App:
         self.country_cb.pack(side='left',padx=(0,6)); self.country_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters())
         self.provider_cb=ttk.Combobox(fbar,textvariable=self.provider,values=['Все провайдеры'],state='readonly',width=17)
         self.provider_cb.pack(side='left',padx=(0,10)); self.provider_cb.bind('<<ComboboxSelected>>',lambda e:self.apply_filters())
-        ttk.Checkbutton(fbar,text='Скрывать offline',variable=self.only_ok,command=self.apply_filters).pack(side='left')
+        ttk.Checkbutton(fbar,text='Скрывать offline и медленные',variable=self.only_ok,command=self.apply_filters).pack(side='left')
 
         self.table=ttk.Frame(rp,style='Panel.TFrame'); table=self.table; table.grid(row=2,column=0,sticky='nsew'); table.rowconfigure(0,weight=1); table.columnconfigure(0,weight=1)
         cols=('type','country','provider','host','port','ping','source','status'); self.tree=ttk.Treeview(table,columns=cols,show='headings',selectmode='extended'); heads={'type':'Тип','country':'Страна','provider':'Провайдер / ASN','host':'Сервер','port':'Порт','ping':'Ping','source':'Источник','status':'Статус'}
@@ -2787,10 +3611,13 @@ class App:
             if narrow:
                 self.card1_outer.grid(row=0,column=0,columnspan=2,sticky='nsew',pady=(0,10))
                 self.card2_outer.grid(row=1,column=0,columnspan=2,sticky='nsew',pady=(0,0))
+                self.card2_outer.grid_configure(pady=(10,0))
+                self.card3_outer.grid(row=2,column=0,columnspan=2,sticky='nsew',pady=(10,0))
                 self.subtitle_label.configure(wraplength=480)
             else:
                 self.card1_outer.grid(row=0,column=0,columnspan=1,sticky='nsew',pady=(0,0))
                 self.card2_outer.grid(row=0,column=1,columnspan=1,sticky='nsew',pady=(0,0))
+                self.card3_outer.grid(row=1,column=0,columnspan=2,sticky='nsew',pady=(10,0))
                 self.subtitle_label.configure(wraplength=900)
             for btn,(long_text,short_text) in self._action_labels.items():
                 btn.config(text=(short_text if narrow else long_text))
@@ -2841,12 +3668,12 @@ class App:
         if help_text: self._help_badge(cap,help_text).pack(side='left',padx=(5,0))
         cb=ttk.Combobox(box,textvariable=var,values=values,state='readonly'); cb.grid(row=1,column=0,sticky='ew'); return cb
 
-    def _entry(self,parent,row,col,label,var,suffix,help_text=None):
+    def _entry(self,parent,row,col,label,var,suffix,help_text=None,show=None):
         box=ttk.Frame(parent,style='Panel.TFrame'); box.grid(row=row,column=col,sticky='ew',padx=(0,10 if col==0 else 0),pady=(0,10)); box.columnconfigure(0,weight=1)
         cap=ttk.Frame(box,style='Panel.TFrame'); cap.grid(row=0,column=0,sticky='w',pady=(0,5)); ttk.Label(cap,text=label,style='Muted.TLabel').pack(side='left')
         if help_text: self._help_badge(cap,help_text).pack(side='left',padx=(5,0))
         line=ttk.Frame(box,style='Panel.TFrame'); line.grid(row=1,column=0,sticky='ew'); line.columnconfigure(0,weight=1)
-        ttk.Entry(line,textvariable=var,width=6).grid(row=0,column=0,sticky='ew'); ttk.Label(line,text=suffix,style='Muted.TLabel').grid(row=0,column=1,padx=(7,0))
+        ttk.Entry(line,textvariable=var,width=6,**({'show':show} if show else {})).grid(row=0,column=0,sticky='ew'); ttk.Label(line,text=suffix,style='Muted.TLabel').grid(row=0,column=1,padx=(7,0))
 
     def _check(self,parent,row,col,text,var,command=None,help_text=None,padx=(0,18)):
         wrap=ttk.Frame(parent,style='Panel.TFrame'); wrap.grid(row=row,column=col,sticky='w',padx=padx,pady=(0,8))
@@ -2881,7 +3708,7 @@ class App:
         except: discovery_time=25
         try: topup_rounds=max(0,min(5,int(self.topup_rounds_var.get())))
         except: topup_rounds=MAX_TOPUP_ROUNDS
-        self.settings.update(interval=interval,limit=limit,max_ping=max_ping,auto_ping=self.auto_ping.get(),only_ok=self.only_ok.get(),country=self.country.get(),provider=self.provider.get(),stability=self.stability_enabled.get(),stability_seconds=stability_seconds,dynamic_target=dynamic_target,concurrency=concurrency,dynamic_sources=self.dynamic_sources.get(),enhanced_search=self.enhanced_search.get(),discovery_time=discovery_time,topup_rounds=topup_rounds,tg_gateways=self.tg_gateways.get(),**{'ptype_'+t:self.ptype_vars[t].get() for t in PROXY_TYPES},github_token=self.github_token_var.get().strip(),telegram_proxy=self.telegram_proxy_var.get().strip())
+        self.settings.update(interval=interval,limit=limit,max_ping=max_ping,auto_ping=self.auto_ping.get(),only_ok=self.only_ok.get(),country=self.country.get(),provider=self.provider.get(),stability=self.stability_enabled.get(),stability_seconds=stability_seconds,dynamic_target=dynamic_target,concurrency=concurrency,dynamic_sources=self.dynamic_sources.get(),enhanced_search=self.enhanced_search.get(),discovery_time=discovery_time,topup_rounds=topup_rounds,tg_gateways=self.tg_gateways.get(),**{'ptype_'+t:self.ptype_vars[t].get() for t in PROXY_TYPES},github_token=self.github_token_var.get().strip(),telegram_proxy=self.telegram_proxy_var.get().strip(),tg_reader=self.tg_reader.get(),discovery_cache=self.discovery_cache.get(),tg_api_id=self.tg_api_id_var.get().strip(),tg_api_hash=self.tg_api_hash_var.get().strip(),tg_phone=self.tg_phone_var.get().strip(),tg_channels=self.tg_channels_var.get().strip(),tg_mtproto=self.tg_mtproto_var.get().strip())
         self.stability_seconds_var.set(str(stability_seconds).rstrip('0').rstrip('.') if stability_seconds%1 else str(int(stability_seconds)))
         self.interval_var.set(str(interval)); self.limit_var.set(str(limit)); self.max_ping_var.set(str(max_ping)); self.dynamic_target_var.set(str(dynamic_target)); self.concurrency_var.set(str(concurrency)); self.discovery_time_var.set(str(discovery_time)); self.topup_rounds_var.set(str(topup_rounds))
         if self.all_results:self.render(self.all_results)
@@ -2896,7 +3723,9 @@ class App:
               'github_token':self.github_token_var.get().strip(),'telegram_proxy':self.telegram_proxy_var.get().strip(),
               'concurrency':self.concurrency_var.get(),'auto_ping':self.auto_ping.get(),'only_ok':self.only_ok.get(),
               'stability_enabled':self.stability_enabled.get(),'stability_seconds':self.stability_seconds_var.get(),
-              'lock_order':self.lock_order.get()}
+              'lock_order':self.lock_order.get(),
+              'tg_reader':self.tg_reader.get(),'discovery_cache':self.discovery_cache.get(),'tg_api_id':self.tg_api_id_var.get().strip(),'tg_api_hash':self.tg_api_hash_var.get().strip(),
+              'tg_phone':self.tg_phone_var.get().strip(),'tg_channels':self.tg_channels_var.get().strip(),'tg_mtproto':self.tg_mtproto_var.get().strip()}
         try:
             with open(SETTINGS_FILE,'w',encoding='utf-8') as f: json.dump(data,f,ensure_ascii=False,indent=2)
             log(f'SETTINGS SAVED to {SETTINGS_FILE}')
@@ -2932,6 +3761,11 @@ class App:
             if 'tg_gateways' in data: self.tg_gateways.set(bool(data['tg_gateways']))
             if 'github_token' in data: self.github_token_var.set(str(data['github_token']))
             if 'telegram_proxy' in data: self.telegram_proxy_var.set(str(data['telegram_proxy']))
+            if 'tg_reader' in data: self.tg_reader.set(bool(data['tg_reader']))
+            if 'discovery_cache' in data: self.discovery_cache.set(bool(data['discovery_cache']))
+            for _k,_v in (('tg_api_id',self.tg_api_id_var),('tg_api_hash',self.tg_api_hash_var),('tg_phone',self.tg_phone_var),('tg_channels',self.tg_channels_var),('tg_mtproto',self.tg_mtproto_var)):
+                if _k in data: _v.set(str(data[_k]))
+            self._refresh_tg_status()
             self._sync_enhanced_availability()
             if 'concurrency' in data: self.concurrency_var.set(str(data['concurrency']))
             if 'auto_ping' in data: self.auto_ping.set(bool(data['auto_ping']))
@@ -2945,6 +3779,122 @@ class App:
         except Exception as e:
             log(f'SETTINGS APPLY FAILED: {e}',True)
             if not silent: messagebox.showerror(APP_TITLE,f'Файл настроек повреждён:\n{e}')
+
+    # ---------- v33: вход в Telegram для чтения каналов и импорт ссылок ----------
+    def _refresh_tg_status(self):
+        if not telethon_available():
+            txt='Telethon не установлен: из исходника — выполните «pip install telethon»; готовый exe (build_windows.bat) ставит его сам.'
+        elif tg_session_exists():
+            txt='✅ Вход выполнен: сессия сохранена. Чтение каналов работает при включённой галочке выше.'
+        else:
+            txt='Вход не выполнен. Заполните api_id, api_hash и телефон и нажмите «Войти в Telegram». Нужен рабочий MTProto-прокси: укажите свой в поле «Свой MTProto-прокси» либо сначала выполните сканирование (вид MTProto).'
+        self.tg_status_var.set(txt)
+
+    def _ask_ui(self,title,prompt,secret=False):
+        """Диалог ввода из рабочего потока: показывается в потоке интерфейса, поток ждёт ответа."""
+        box={}; ev=threading.Event()
+        def ui():
+            try: box['v']=simpledialog.askstring(title,prompt,show='•' if secret else None,parent=self.root)
+            finally: ev.set()
+        self.q.put(('call',ui)); ev.wait(); return box.get('v')
+
+    def tg_login(self):
+        self.sync_settings()
+        if not telethon_available():
+            messagebox.showerror(APP_TITLE,'Не установлен Telethon (библиотека протокола Telegram).\nИз исходника: pip install telethon. В exe, собранном build_windows.bat, он уже есть.'); return
+        api_id=self.tg_api_id_var.get().strip(); api_hash=self.tg_api_hash_var.get().strip(); phone=self.tg_phone_var.get().strip()
+        if not api_id.isdigit() or len(api_hash)<20 or not phone.startswith('+'):
+            messagebox.showwarning(APP_TITLE,'Заполните api_id (число), api_hash (32 символа) и телефон в международном формате (+7…). api_id/api_hash берутся на my.telegram.org → API development tools.'); return
+        mine=parse_user_mtproto(self.tg_mtproto_var.get())
+        proxies=mine+reader_candidate_proxies([p for p in self.all_results if p.get('ok')])+[None]
+        if proxies==[None] and not messagebox.askyesno(APP_TITLE,'Нет ни ваших, ни найденных рабочих MTProto-прокси (укажите свой в поле выше или выполните сканирование). Вход возможен напрямую, только если Telegram у вас открывается без прокси.\n\nЕсли не открывается — отмените, выполните сканирование (вид MTProto) и повторите вход.\n\nПопробовать напрямую?'): return
+        self.save_settings(silent=True)
+        self.tg_status_var.set('Вход: подключаюсь к Telegram… (до нескольких минут, пока подбирается рабочий прокси)')
+        threading.Thread(target=self._tg_login_worker,args=(api_id,api_hash,phone,proxies),daemon=True).start()
+
+    def _tg_login_worker(self,api_id,api_hash,phone,proxies):
+        def st(m): self.q.put(('call',lambda:self.tg_status_var.set(m)))
+        reader=None
+        try:
+            reader=TgReader(api_id,api_hash,log_cb=log)
+            reader.connect(proxies,status_cb=st,max_tries=max(12,len(proxies)))
+            if reader.is_authorized():
+                st('✅ Вход уже выполнен.'); self.q.put(('call',self._refresh_tg_status)); return
+            st('Запрашиваю код входа (он придёт в приложение Telegram или по SMS)…')
+            reader.send_code(phone)
+            code=self._ask_ui(APP_TITLE,'Введите код, который прислал Telegram:')
+            if not code: st('Вход отменён.'); return
+            res=reader.sign_in(code=code.strip().replace(' ',''))
+            if res=='password':
+                pw=self._ask_ui(APP_TITLE,'У аккаунта включён облачный пароль (2FA). Введите его:',secret=True)
+                if not pw: st('Вход отменён.'); return
+                res=reader.sign_in(password=pw)
+            name=reader.me_label()
+            log('TGREADER login OK')   # ни коды, ни пароль, ни api_hash в лог не пишутся
+            self.q.put(('call',lambda:(self._refresh_tg_status(),self.status.config(text='Вход в Telegram выполнен'+(f': {name}' if name else '')))))
+        except Exception as e:
+            log(f'TGREADER login FAIL {type(e).__name__}: {str(e)[:200]}',True)
+            msg=f'{type(e).__name__}: {str(e)[:200]}'
+            self.q.put(('call',lambda:(self._refresh_tg_status(),messagebox.showerror(APP_TITLE,'Не удалось войти в Telegram:\n'+msg))))
+        finally:
+            if reader: reader.close()
+
+    def tg_logout(self):
+        if not (tg_session_exists() or os.path.exists(TG_SESSION_FILE+'.session')):
+            messagebox.showinfo(APP_TITLE,'Сохранённой сессии нет.'); return
+        if messagebox.askyesno(APP_TITLE,'Удалить сохранённую сессию входа с этого компьютера?\n\nЧтобы полностью закрыть этот сеанс на стороне Telegram, откройте Telegram → Настройки → Устройства и завершите сеанс «Telegram Proxy Scanner»/Telethon.'):
+            delete_tg_session_files(); self._refresh_tg_status()
+
+    def _refresh_imported(self):
+        n=len([l for l in load_imported_links().splitlines() if l.strip()])
+        self.imported_var.set(f'Импортировано ссылок: {n}. Будут проверены при следующем сканировании.' if n else 'Импортированных ссылок нет.')
+
+    def _import_text(self,text,origin):
+        ps=parse_proxies(text,types=PROXY_TYPES)
+        if not ps:
+            messagebox.showinfo(APP_TITLE,f'В {origin} не найдено ссылок на прокси (tg://proxy, tg://socks, tg://webproxy, t.me/proxy… или host:port).'); return
+        added,total=save_imported_proxies(ps)
+        by={t:sum(1 for p in ps if p.get('ptype','mtproto')==t) for t in PROXY_TYPES}
+        log(f'IMPORT {origin}: найдено={len(ps)} новых={added} всего={total} по видам={by}')
+        self._refresh_imported()
+        self.status.config(text=f'Импорт: найдено {len(ps)} (новых {added}) — '+', '.join(f'{PTYPE_LABELS[t]} {n}' for t,n in by.items() if n))
+
+    def import_from_file(self):
+        paths=filedialog.askopenfilenames(title='Файлы с прокси-ссылками (экспорт Telegram Desktop: JSON/HTML, текст)',filetypes=[('Экспорт/текст','*.json *.html *.htm *.txt *.md *.csv'),('Все файлы','*.*')])
+        for path in paths or ():
+            try:
+                with open(path,'rb') as f: raw=f.read(40_000_000)
+                self._import_text(extract_text_from_export(raw,path),os.path.basename(path))
+            except Exception as e:
+                log(f'IMPORT FAIL {path}: {e}',True); messagebox.showerror(APP_TITLE,f'Не удалось прочитать файл:\n{e}')
+
+    def import_from_text(self):
+        win=tk.Toplevel(self.root); win.title('Вставить текст со ссылками'); win.configure(bg=COLORS['bg']); win.geometry('640x420'); win.transient(self.root)
+        ttk.Label(win,text='Вставьте сюда сообщения канала или список ссылок (Ctrl+V работает в любой раскладке):',style='Muted.TLabel').pack(anchor='w',padx=14,pady=(12,6))
+        txt=tk.Text(win,wrap='word',bg=COLORS['input'],fg=COLORS['text'],insertbackground=COLORS['text'],relief='flat',highlightthickness=1,highlightbackground=COLORS['border'])
+        txt.pack(fill='both',expand=True,padx=14); txt.focus_set()
+        def ok():
+            data=txt.get('1.0','end'); win.destroy()
+            if data.strip(): self._import_text(data,'вставленном тексте')
+        row=ttk.Frame(win); row.pack(fill='x',padx=14,pady=12)
+        ttk.Button(row,text='Добавить',style='Accent.TButton',command=ok).pack(side='right')
+        ttk.Button(row,text='Отмена',style='Ghost.TButton',command=win.destroy).pack(side='right',padx=(0,8))
+
+    def import_clear(self):
+        if messagebox.askyesno(APP_TITLE,'Удалить все импортированные ссылки?'):
+            clear_imported(); self._refresh_imported()
+
+    def apply_recommended(self):
+        """Кнопка «Рекомендуемые настройки» (v33): выставляет фиксированный набор значений."""
+        self.limit_var.set('10'); self.max_ping_var.set('300')
+        self.dynamic_sources.set(True); self.enhanced_search.set(True)
+        self.dynamic_target_var.set('40'); self.discovery_time_var.set('300'); self.topup_rounds_var.set('3')
+        for t in PROXY_TYPES: self.ptype_vars[t].set(t=='mtproto')
+        self.concurrency_var.set('256'); self.auto_ping.set(True)
+        self.stability_enabled.set(True); self.stability_seconds_var.set('3'); self.lock_order.set(True)
+        self._sync_enhanced_availability(); self.apply_filters()
+        log('SETTINGS рекомендуемые настройки применены')
+        self.status.config(text='Рекомендуемые настройки применены. Чтобы они подхватывались при следующем запуске, нажмите «Сохранить настройки».')
 
     def start(self):
         if self.scan_running:return
@@ -2983,9 +3933,11 @@ class App:
         self.all_results=[]; self._order_counter=0; self._update_stats([],[])
 
     def scan(self):
+        rd={'active':False,'blocked':False,'reader':None}   # v33: чтение тг-каналов через MTProto (Telethon)
+        tm={'start':time.time()}
         try:
             reset_tme_probe_cache()  # свежая проверка доступности t.me на каждое новое сканирование (см. комментарий у tme_reachable)
-            log(f'SCAN begin dynamic={self.scan_dynamic_sources} settings={self.scan_settings}')
+            log(f'SCAN begin dynamic={self.scan_dynamic_sources} settings={ {k:("***" if k in ("tg_api_hash","github_token") and v else v) for k,v in self.scan_settings.items()} }')
             concurrency=int(self.scan_settings.get('concurrency',64) or 64)
             global NET_GATE; NET_GATE=threading.Semaphore(max(1,concurrency))  # один общий лимит на все сетевые проверки этого скана (см. комментарий у NET_GATE)
             dynamic_target=int(self.scan_settings.get('dynamic_target',40) or 40)
@@ -2998,6 +3950,18 @@ class App:
             include_other=any(t!='mtproto' for t in types)  # есть ли вообще не-MTProto виды
             log(f'SCAN types={",".join(types)}')
             github_token=(self.scan_settings.get('github_token') or '').strip() or None
+            # v33 (пункт №5): чтение каналов через MTProto — включено галочкой, нужны api_id/api_hash,
+            # установленный Telethon и сохранённая сессия (вход выполнен в настройках).
+            user_channels=parse_channel_list(self.scan_settings.get('tg_channels',''))
+            if self.scan_settings.get('tg_reader'):
+                _why=''
+                if not telethon_available(): _why='не установлен Telethon (его ставит build_windows.bat; в exe он уже внутри)'
+                elif not (str(self.scan_settings.get('tg_api_id','')).strip() and str(self.scan_settings.get('tg_api_hash','')).strip()): _why='не заданы api_id/api_hash'
+                elif not tg_session_exists(): _why='вход в Telegram не выполнен (кнопка «Войти в Telegram» в настройках)'
+                if _why:
+                    log(f'TGREADER выключен: {_why}'); self.q.put(('status',f'Чтение каналов через MTProto недоступно: {_why}.'))
+                else:
+                    rd['active']=True; log(f'TGREADER включён, extra_channels={len(user_channels)}')
             # Пункт №1 обращения v29: "подключение к telegram можно осуществлять через
             # рабочий прокси... касается всех telegram источников" — парсим ОДИН раз в
             # начале сканирования (не на каждый t.me-запрос) и используем везде, где
@@ -3034,7 +3998,16 @@ class App:
                 # реально найдёт сама.
                 discovery_time=float(self.scan_settings.get('discovery_time',25) or 25)
                 self.q.put(('status',f'{"Улучшенный" if enhanced else "Динамический"} поиск источников (цель: {dynamic_target}, до {discovery_time:.0f} с)…'))
-                discovered=discover_sources(self.stop_event,lambda s:self.q.put(('status',s)),target=dynamic_target,enhanced=enhanced,time_budget=discovery_time,github_token=github_token,telegram_proxy=telegram_proxy,types=types)
+                _topups=int(self.scan_settings.get('topup_rounds',MAX_TOPUP_ROUNDS) or 0)
+                cached=load_discovery_cache(types,enhanced) if self.scan_settings.get('discovery_cache',True) else None
+                if cached:
+                    discovered,_age=cached
+                    log(f'DISCOVERY кэш: использую {len(discovered)} источников прошлого поиска (возраст {_age/60:.0f} мин) — поиск пропущен')
+                    self.q.put(('status',f'Использую {len(discovered)} источников из прошлого поиска ({_age/60:.0f} мин назад) — поиск пропущен для скорости…'))
+                else:
+                    discovered=discover_sources(self.stop_event,lambda s:self.q.put(('status',s)),target=dynamic_target,enhanced=enhanced,time_budget=discovery_time,github_token=github_token,telegram_proxy=telegram_proxy,types=types,
+                                                early_stop=(max(6,dynamic_target//4) if _topups>0 else None))
+                    if self.scan_settings.get('discovery_cache',True) and discovered: save_discovery_cache(types,enhanced,discovered)
                 used_source_urls.update(url for url,_ in discovered)
                 sources=[(name,url) for url,name in discovered]
                 log(f'DYNAMIC-ONLY sources discovered={len(sources)} enhanced={enhanced} (встроенный список не используется)')
@@ -3047,6 +4020,9 @@ class App:
                 sources=[x for x in STATIC_SOURCES if ('mtproto' in types or x[1].startswith('tgchannel://'))]
                 self.q.put(('status',f'Использую {len(sources)} встроенных источников…'))
                 log(f'STATIC sources count={len(sources)}')
+            for _ch in (list(ENHANCED_SEED_CHANNELS) if rd['active'] else [])+user_channels:   # с чтением через MTProto — и весь seed-список каналов
+                if not any(u==f'tgchannel://{_ch}' for _,u in sources): sources.append(('tg:'+_ch,f'tgchannel://{_ch}'))
+            tm['discovery']=time.time()
             extra_typed=typed_sources_for(types)
             if extra_typed:
                 sources=sources+extra_typed
@@ -3056,7 +4032,7 @@ class App:
             if self.stop_event.is_set():
                 log('SCAN stopped before source loading'); return
 
-            candidates={}; source_errors=[]; total_sources_loaded=0
+            candidates={}; source_errors=[]; total_sources_loaded=0; deferred_channels=[]
 
             def load_sources(src_list):
                 """Fetch+parse a batch of sources into `candidates` (deduped by
@@ -3074,6 +4050,8 @@ class App:
                     for name,url in src_list:
                         ptype=OTHER_SOURCE_TYPES.get(url) or _SOURCE_TYPE_HINTS.get(url)  # 'socks5'/'http' для «голых» списков одного вида, иначе None
                         if ptype and ptype not in types: continue  # вид не выбран пользователем
+                        if url.startswith('tgchannel://') and rd['active'] and not rd['blocked']:
+                            deferred_channels.append(url[len('tgchannel://'):]); continue   # v33: читаются через MTProto, см. process_deferred_channels
                         if url.startswith('tgchannel://'):
                             fs[ex.submit(_load_channel_source,url,include_other,telegram_proxy)]=(url,name,None)
                         elif ptype:
@@ -3099,19 +4077,114 @@ class App:
                             self.q.put(('progress_source',(loaded,len(src_list)))); self.q.put(('status',f'Источник {loaded}/{len(src_list)} недоступен: {name} • {str(e)[:120]}'))
                 return len(candidates)-before
 
+            def read_channels_via_mtproto(chans):
+                """{канал: текст|None} через Telethon. Нужны рабочие MTProto-прокси — берём из уже
+                загруженных кандидатов (а если их мало, докачиваем несколько встроенных
+                MTProto-списков), быстро отбираем реально рабочие и входим через них."""
+                reader=TgReader(self.scan_settings.get('tg_api_id'),self.scan_settings.get('tg_api_hash'),log_cb=log)
+                rd['reader']=reader
+                mine=parse_user_mtproto(self.scan_settings.get('tg_mtproto',''))
+                if mine:
+                    # v33: прокси, указанные пользователем, пробуются в первую очередь, без автоподбора.
+                    self.q.put(('status',f'Чтение тг-каналов через MTProto: пробую ваши прокси ({len(mine)})…'))
+                    try:
+                        reader.connect(mine,stop_event=self.stop_event,status_cb=lambda m:self.q.put(('status',m)),max_tries=len(mine))
+                    except Exception as e:
+                        log(f'TGREADER: ваши MTProto-прокси не сработали: {e} — подбираю автоматически')
+                if reader.client is not None:
+                    if not reader.is_authorized(): raise RuntimeError('сессия Telegram недействительна — выполните вход заново (кнопка «Войти в Telegram»)')
+                    return reader.fetch_channels(chans,stop_event=self.stop_event,status_cb=lambda m:self.q.put(('status',m)))
+                self.q.put(('status','Чтение тг-каналов через MTProto: подбираю рабочие прокси для входа…'))
+                pool=[p for p in candidates.values() if p.get('ptype','mtproto')=='mtproto']
+                if len(pool)<40:
+                    extra=[x for x in STATIC_SOURCES if not x[1].startswith('tgchannel://')][:6]
+                    with ThreadPoolExecutor(max_workers=6) as ex2:
+                        for fut in [ex2.submit(http_get,u,8) for _,u in extra]:
+                            try: pool.extend(parse_proxies(fut.result(),types=('mtproto',)))
+                            except Exception: pass
+                good=pick_working_mtproto(pool,self.stop_event,want=8,time_budget=45.0)
+                log(f'TGREADER proxies: pool={len(pool)} working={len(good)}')
+                if not good: raise RuntimeError('не нашлось ни одного рабочего MTProto-прокси для входа в Telegram')
+                reader.connect(good,stop_event=self.stop_event,status_cb=lambda m:self.q.put(('status',m)))
+                if not reader.is_authorized(): raise RuntimeError('сессия Telegram недействительна — выполните вход заново (кнопка «Войти в Telegram»)')
+                return reader.fetch_channels(chans,stop_event=self.stop_event,status_cb=lambda m:self.q.put(('status',m)))
+
+            def process_deferred_channels():
+                nonlocal total_sources_loaded
+                chans=list(dict.fromkeys(deferred_channels)); deferred_channels.clear()
+                if not chans or self.stop_event.is_set(): return 0
+                before=len(candidates); fallback=[]
+                try:
+                    texts=read_channels_via_mtproto(chans)
+                except Exception as e:
+                    log(f'TGREADER FAIL: {type(e).__name__}: {e}',True)
+                    self.q.put(('status',f'Чтение каналов через MTProto не удалось: {str(e)[:140]} — пробую обычные маршруты.'))
+                    rd['blocked']=True; texts={}
+                def absorb(texts_map):
+                    for ch,t in texts_map.items():
+                        if t is None: fallback.append(ch); continue
+                        nonlocal total_sources_loaded
+                        total_sources_loaded+=1
+                        ps=parse_proxies(t,types=types)
+                        for p in ps:
+                            p['source']='tg:'+ch; candidates[_pkey(p)]=p
+                        log(f'SOURCE OK tg:{ch} (MTProto) chars={len(t)} parsed={len(ps)} total={len(candidates)}')
+                absorb(texts)
+                # Второй шаг: каналы, на которые ссылаются прочитанные посты (подборки каналов вроде
+                # urlsources) — читаем до TG_READER_HOP_LIMIT новых, один уровень вглубь.
+                if rd['reader'] is not None and not rd['blocked'] and not self.stop_event.is_set():
+                    seen=set(c.lower() for c in chans); hop=[]
+                    for t in texts.values():
+                        for name in extract_channel_mentions(t or ''):
+                            if name.lower() not in seen: seen.add(name.lower()); hop.append(name)
+                    hop=hop[:TG_READER_HOP_LIMIT]
+                    if hop:
+                        log(f'TGREADER hop: найдено ссылок на каналы: {len(hop)}: {",".join(hop)}')
+                        try:
+                            absorb({c:t for c,t in rd['reader'].fetch_channels(hop,stop_event=self.stop_event,status_cb=lambda m:self.q.put(('status',m))).items() if t is not None})
+                        except Exception as e:
+                            log(f'TGREADER hop FAIL {type(e).__name__}: {e}',True)
+                if fallback:
+                    log(f'TGREADER: через MTProto не прочитано каналов: {len(fallback)} — пробую обычный маршрут')
+                    rd['blocked']=True
+                    load_sources([('tg:'+c,'tgchannel://'+c) for c in fallback])
+                return len(candidates)-before
+
+            def load_all(src_list):
+                n=load_sources(src_list)
+                n+=process_deferred_channels()
+                return n
+
             # ВАЖНО: никогда не прекращаем загрузку источников только потому, что уже набрали N кандидатов.
             # Иначе нужное число рабочих прокси может не набраться после TCP/geo/фильтров.
-            load_sources(sources)
+            load_all(sources)
+            # v33: ссылки, импортированные пользователем из файла/текста (кнопки в настройках).
+            _imp=load_imported_links()
+            if _imp:
+                _ips=parse_proxies(_imp,types=types)
+                for p in _ips:
+                    p['source']='Импорт'; candidates[_pkey(p)]=p
+                log(f'IMPORTED links parsed={len(_ips)} (из файла импорта, выбранные виды)')
+            tm['load']=time.time()
             log(f'SOURCE LOAD finished loaded={total_sources_loaded}/{len(sources)} candidates={len(candidates)} errors={len(source_errors)}')
             if not candidates:
                 detail='; '.join(source_errors[:12]) if source_errors else 'Источники не вернули данных.'
-                raise RuntimeError('Не удалось загрузить ни одного прокси-кандидата. См. TelegramProxyScanner_debug.log. Детали: '+detail)
+                _wh=''
+                if types==('web',):
+                    _wh=(' Для вида WEB это ожидаемо: публичных списков tg://webproxy почти не существует (в найденных README лежат только примеры вроде proxy.example.com — '
+                         'программа их отбрасывает). Реальные WEB-ссылки бывают в тг-каналах: включите чтение каналов через MTProto (настройка «Чтение Telegram-каналов») '
+                         'и/или добавьте ссылки кнопкой «Импорт из файла/текста».')
+                raise RuntimeError('Не удалось загрузить ни одного прокси-кандидата. См. TelegramProxyScanner_debug.log. Детали: '+detail+_wh)
 
             target=self.scan_settings['limit']; max_ping=self.scan_settings['max_ping']
             wanted_country=self.scan_settings['country']; wanted_provider=self.scan_settings['provider']
             stability_on=self.scan_settings['stability']; stability_seconds=self.scan_settings['stability_seconds']
             found=[]; checked=0; found_lock=threading.Lock(); target_reached=threading.Event()
             already_checked_keys=set()  # не проверяем повторно один и тот же прокси в раундах дозапроса
+            # v31: счётчики «куда делись кандидаты» — без них при пустом результате было
+            # невозможно понять, прокси мертвы, слишком медленны или отсеяны фильтрами
+            # (в логе были только принятые и ни слова об отброшенных по ping).
+            diag={'tcp_fail':0,'proto_fail':0,'slow':[],'geo_filtered':0,'unstable':0}
 
             def passes_filters(p):
                 country=country_name(p); provider=provider_name(p)
@@ -3137,7 +4210,10 @@ class App:
                 if passed:
                     p['stability']='Онлайн - Проверен'
                     accept(p)
+                elif detail=='сканирование остановлено':
+                    pass   # нужное число уже набрано/нажат «Стоп» — проверка прервана, это не брак прокси (раньше попадало в счётчик «не прошли стабильность»)
                 else:
+                    diag['unstable']+=1
                     log(f'PROXY DROPPED (стабильность) {p["server"]}:{p["port"]}: {detail}')
 
             def run_check_round(proxy_list):
@@ -3159,14 +4235,21 @@ class App:
                             except Exception as e: ok,ms,ip,err,method=False,None,None,str(e),'error'; log(f'CHECK worker exception: {e}', True)
                             checked+=1; self.q.put(('progress',checked))
                             p.update(ok=ok,ping=ms,ip=ip,error=err,check_method=method)
+                            if not ok:
+                                diag['tcp_fail' if method=='tcp' else 'proto_fail']+=1
+                            elif ms is not None and ms>max_ping:
+                                diag['slow'].append(ms)
                             if not (ok and ms is not None and ms<=max_ping): continue
                             p['geo']=geo(ip)
                             log(f'PROXY ONLINE {p["server"]}:{p["port"]} ping={ms} method={method} country={country_name(p)} provider={provider_name(p)}')
-                            if not passes_filters(p): continue
+                            if not passes_filters(p):
+                                diag['geo_filtered']+=1; continue
                             if method=='tcp-only':
                                 p['stability']='Онлайн (не проверено)'
                             elif method=='web':
                                 p['stability']='Онлайн (HTTPS проверен)'
+                            elif method in ('socks5','http'):
+                                p['stability']='Онлайн (Telegram проверен)'
                             else:
                                 p['stability']='Онлайн'
                             if stability_on and method in STABILITY_SUPPORTED_METHODS:
@@ -3182,9 +4265,20 @@ class App:
             # SOCKS5/HTTP из больших универсальных списков — иначе тысячи «голых» адресов
             # заняли бы все потоки раньше, чем дойдёт очередь до MTProto.
             _rank={t:i for i,t in enumerate(('mtproto','web','socks5','http'))}
-            proxies=sorted(candidates.values(),key=lambda p:_rank.get(p.get('ptype','mtproto'),9)); self.q.put(('progress_check_start',len(proxies)))
+            # v33: огромные «голые» списки SOCKS5/HTTP (100 000+ адресов, ~30 мин проверки) режем до
+            # случайной выборки MAX_BARE_CANDIDATES на вид — доля рабочих в любой части списка
+            # одинакова, а ждать часами незачем. MTProto и WEB не режутся никогда.
+            _all=list(candidates.values()); _kept=[]
+            for _t in ('socks5','http'):
+                _lst=[p for p in _all if p.get('ptype')==_t]
+                if len(_lst)>MAX_BARE_CANDIDATES:
+                    random.shuffle(_lst); _drop={id(p) for p in _lst[MAX_BARE_CANDIDATES:]}
+                    log(f'CANDIDATES cap {_t}: {len(_lst)} -> {MAX_BARE_CANDIDATES} (случайная выборка)')
+                    _all=[p for p in _all if id(p) not in _drop]
+            proxies=sorted(_all,key=lambda p:_rank.get(p.get('ptype','mtproto'),9)); self.q.put(('progress_check_start',len(proxies)))
             already_checked_keys.update(candidates.keys())
             run_check_round(proxies)
+            tm['check']=time.time()
 
             # ---- Дозапрос (top-up), пункт №2 из обращения пользователя ----
             # Идея пользователя: если рабочих прокси набралось меньше, чем запрошено,
@@ -3217,7 +4311,8 @@ class App:
                 if not more or self.stop_event.is_set():
                     log(f'TOPUP round={topup_round} no new sources found — остановка дозапроса'); break
                 used_source_urls.update(url for url,_ in more)
-                added=load_sources([(name,url) for url,name in more])
+                if self.scan_settings.get('discovery_cache',True): save_discovery_cache(types,enhanced,more)
+                added=load_all([(name,url) for url,name in more])
                 log(f'TOPUP round={topup_round} new_sources={len(more)} new_candidates={added} total_candidates={len(candidates)}')
                 if added<=0:
                     log(f'TOPUP round={topup_round} новые источники не дали новых кандидатов — остановка дозапроса'); break
@@ -3227,24 +4322,34 @@ class App:
                 run_check_round(new_proxies)
 
             found.sort(key=lambda p:p.get('ping',999999))
+            _now=time.time()
+            log(f'SCAN TIMING всего={_now-tm["start"]:.0f}с: подготовка+поиск источников={tm.get("discovery",_now)-tm["start"]:.0f}с, загрузка источников/каналов={tm.get("load",_now)-tm.get("discovery",_now):.0f}с, '
+                f'первая проверка={tm.get("check",_now)-tm.get("load",_now):.0f}с, дозапрос={_now-tm.get("check",_now):.0f}с (параллельность={concurrency}, проверено={checked})')
             log(f'SCAN complete checked={checked} found={len(found)} target={target} topup_rounds={topup_round}')
+            summary,hint=explain_scan_result(checked,len(found),target,max_ping,diag,dynamic=self.scan_dynamic_sources,sources_loaded=total_sources_loaded,candidates=len(candidates))
+            log('CHECK SUMMARY '+summary)
+            if hint: log('CHECK HINT '+hint)
             self.q.put(('results',found)); self.q.put(('progress_finished',None))
             if self.stop_event.is_set():
                 self.q.put(('status',f'Остановлено • найдено {len(found)} из {target}'))
             elif len(found)<target:
-                self.q.put(('status',f'Готово • найдено {len(found)} из {target} — проверены все доступные кандидаты'))
+                self.q.put(('status',f'Готово • найдено {len(found)} из {target} — {summary}'))
+                if hint and len(found)==0: self.q.put(('notice',hint))
             else:
                 self.q.put(('status',f'Готово • найдено {target} прокси'))
         except Exception as e:
             log(f'SCAN FATAL {type(e).__name__}: {e}', True)
             self.q.put(('progress_error',str(e))); self.q.put(('error',str(e)))
         finally:
+            if rd.get('reader'):
+                try: rd['reader'].close()
+                except Exception: pass
             self.q.put(('enable',None))
 
     def accept_filter(self,p):
         if self.settings['country']!='Все страны' and country_name(p)!=self.settings['country']: return False
         if self.settings['provider']!='Все провайдеры' and self.settings['provider'] not in provider_name(p): return False
-        if self.settings['only_ok'] and not p.get('ok'): return False
+        if self.settings['only_ok'] and (not p.get('ok') or (p.get('ping') is not None and p['ping']>self.settings['max_ping'])): return False
         return True
     def filtered_sorted(self):
         x=[p for p in self.all_results if self.accept_filter(p)]
@@ -3265,11 +4370,16 @@ class App:
         visible=self.filtered_sorted()
         for idx,p in enumerate(visible):
             g=p.get('geo') or {}; provider=g.get('isp') or g.get('org') or g.get('as') or '—'; ping=p.get('ping')
-            if p.get('stability')=='Онлайн - Проверен': status='●  Онлайн - Проверен'
+            # v32: подпись отражает ТЕКУЩЕЕ состояние. Раньше «Онлайн - Проверен» стояла
+            # первой и оставалась, даже когда автопроверка уже пометила прокси offline или
+            # его ping вышел за «Макс. ping» — выглядело как «проверка стабильности врёт».
+            if not p.get('ok'): status='●  Offline'
+            elif ping is not None and ping>self.settings['max_ping']: status='●  Онлайн, но медленный'
+            elif p.get('stability')=='Онлайн - Проверен': status='●  Онлайн - Проверен'
             elif p.get('check_method')=='tcp-only': status='●  Онлайн (не проверено)'
             elif p.get('check_method')=='web': status='●  Онлайн (HTTPS проверен)'
-            elif p.get('ok'): status='●  Онлайн'
-            else: status='●  Offline'
+            elif p.get('check_method') in ('socks5','http'): status='●  Онлайн (Telegram проверен)'
+            else: status='●  Онлайн'
             if not p.get('ok'): tag='bad'
             elif ping is not None and ping<=100: tag='good'
             else: tag='slow'
@@ -3326,18 +4436,20 @@ class App:
         if not add_to_telegram(p['link']): raise RuntimeError('Windows не передал tg:// Telegram Desktop')
         self.status.config(text='Прокси передан Telegram Desktop — подтвердите добавление в Telegram, если появится окно')
     def ping_loop(self):
-        # Note: the stability check itself now runs once, during the scan, on every
-        # candidate BEFORE it is ever added to the visible list (see stability_test /
-        # scan()). This loop only does the lightweight periodic re-ping of proxies
-        # already accepted into the list, so users can see if a listed proxy later goes
-        # offline; it no longer re-runs (or can crash) the stability logic per row, which
-        # used to incorrectly flip FakeTLS proxies to "offline" every cycle.
+        # v32: автопроверка ping ПОСЛЕ сканирования. Раньше она делала простой TCP-коннект
+        # с таймаутом ~1 с (привязан к «Интервалу ping») и ПЕРЕЗАПИСЫВАЛА ok/ping у уже
+        # проверенных прокси: единичный сбой TCP или соединение дольше секунды превращали
+        # проверенный прокси в «offline» (ping «—»), а TCP-время (не равное времени
+        # настоящего MTProto-обмена, по которому прокси отбирался) могло оказаться выше
+        # «Макс. ping» — при этом подпись «Онлайн - Проверен» оставалась (см. render).
+        # Теперь пере-проверка идёт ТЕМ ЖЕ протокольным методом, что и отбор
+        # (check_proxy_online), с тем же таймаутом, и «offline» ставится только после
+        # двух неудач подряд — единичный сбой не бракует прокси.
         while True:
             started=time.perf_counter(); interval=self.settings.get('interval',1.0)
             if self.all_results and not self.scan_running and self.settings.get('auto_ping'):
                 targets=list(self.all_results)
-                def one(p):
-                    ok,ms,ip,err=tcp_probe(p,min(2.0,max(.35,interval))); p.update(ok=ok,ping=ms,ip=ip,error=err)
+                one=recheck_proxy
                 try:
                     workers=max(1,min(30,self.settings.get('concurrency',64),len(targets)))
                     with ThreadPoolExecutor(max_workers=workers) as ex: list(ex.map(one,targets))
@@ -3374,6 +4486,9 @@ class App:
                     self._progress_last_tick=time.time()  # см. _progress_heartbeat
                 if typ=='status':
                     self.status.config(text=val)
+                elif typ=='call':
+                    try: val()   # v33: вызов в потоке интерфейса из рабочего потока (диалоги входа и т.п.)
+                    except Exception as e: log(f'UI call failed: {type(e).__name__}: {e}',True)
                 elif typ=='progress_indeterminate':
                     self.progress.stop(); self.progress.config(mode='indeterminate'); self.progress.start(12); self.progress_label.config(text=val)
                 elif typ=='progress_source':
@@ -3404,6 +4519,8 @@ class App:
                 elif typ=='error':
                     self.status.config(text=f'Сканирование завершено: ошибка — {val}')
                     messagebox.showerror(APP_TITLE,val)
+                elif typ=='notice':
+                    messagebox.showinfo(APP_TITLE,val)
                 elif typ=='enable':
                     self.scan_running=False; self.scan_btn.config(state='normal'); self.stop_btn.config(state='disabled'); self.export_btn.config(state='normal')
         except queue.Empty:
